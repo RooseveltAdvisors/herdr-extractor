@@ -54,14 +54,21 @@ fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'sta
         .map(|(is_selected, text)| {
             let prefix = if *is_selected { "> " } else { "  " };
             let line = format!("{prefix}{text}");
-            let style = if *is_selected {
-                app.theme().match_style(true).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::DIM)
-            };
-            Line::from(Span::styled(truncate(&line, width), style))
+            Line::from(Span::styled(
+                truncate(&line, width),
+                row_style(app.theme(), *is_selected),
+            ))
         })
         .collect()
+}
+
+fn row_style(theme: &crate::theme::Theme, is_selected: bool) -> Style {
+    let style = theme.match_style(is_selected);
+    if is_selected {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style.add_modifier(Modifier::DIM)
+    }
 }
 
 fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
@@ -156,5 +163,30 @@ mod tests {
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("ab", 4), "ab");
+    }
+
+    #[test]
+    fn row_style_applies_match_colors_for_selected_and_unselected() {
+        use crate::theme::Theme;
+        use ratatui::style::Color;
+
+        let theme = Theme {
+            match_fg: Color::Cyan,
+            match_bg: Some(Color::DarkGray),
+            selected_match_fg: Color::White,
+            selected_match_bg: Color::Blue,
+            ..Theme::default()
+        };
+
+        let selected = row_style(&theme, true);
+        assert_eq!(selected.fg, Some(Color::White));
+        assert_eq!(selected.bg, Some(Color::Blue));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
+
+        let unselected = row_style(&theme, false);
+        assert_eq!(unselected.fg, Some(Color::Cyan));
+        assert_eq!(unselected.bg, Some(Color::DarkGray));
+        assert!(unselected.add_modifier.contains(Modifier::DIM));
+        assert!(!unselected.add_modifier.contains(Modifier::BOLD));
     }
 }

@@ -100,7 +100,7 @@ fn filter_paths(text: &str) -> Vec<ExtractItem> {
     });
     static EXCLUDE: OnceLock<Regex> = OnceLock::new();
     let exclude =
-        EXCLUDE.get_or_init(|| Regex::new(r"(?i)[kmg]/s$|^\d+/\d+$").expect("path exclude"));
+        EXCLUDE.get_or_init(|| Regex::new(r"(?i)[kmgbps]/s$|^\d+/\d+$").expect("path exclude"));
 
     let mut out = Vec::new();
     let haystack = format!("\n{text}");
@@ -327,5 +327,30 @@ curl https://cdn.example.org/v2/asset.tar.gz
     #[test]
     fn empty_visible_text_extracts_nothing() {
         assert!(extract_items_from_visible_text("").is_empty());
+    }
+
+    #[test]
+    fn path_exclude_drops_transfer_speeds_and_page_fractions_only() {
+        let paths = filter_paths(
+            "see path/file.rs /tmp/logs /tmp/app /tmp/foo=bar/apps and 5k/s 12m/s 3b/s page 1/2",
+        );
+        let paths: Vec<_> = paths.iter().map(|item| item.text.as_str()).collect();
+        for expected in [
+            "path/file.rs",
+            "/tmp/logs",
+            "/tmp/app",
+            "/tmp/foo=bar/apps",
+        ] {
+            assert!(
+                paths.contains(&expected),
+                "missing legitimate path {expected:?} in {paths:?}"
+            );
+        }
+        for excluded in ["5k/s", "12m/s", "3b/s", "1/2"] {
+            assert!(
+                !paths.contains(&excluded),
+                "excluded token {excluded:?} leaked into {paths:?}"
+            );
+        }
     }
 }

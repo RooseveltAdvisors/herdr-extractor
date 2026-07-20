@@ -1,14 +1,10 @@
 use anyhow::{bail, Result};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
-    pub hint_fg: Color,
-    pub hint_bg: Color,
     pub match_fg: Color,
     pub match_bg: Option<Color>,
-    pub selected_hint_fg: Color,
-    pub selected_hint_bg: Color,
     pub selected_match_fg: Color,
     pub selected_match_bg: Color,
     pub status_fg: Color,
@@ -19,12 +15,8 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            hint_fg: Color::Black,
-            hint_bg: Color::Yellow,
             match_fg: Color::Yellow,
             match_bg: None,
-            selected_hint_fg: Color::White,
-            selected_hint_bg: Color::Magenta,
             selected_match_fg: Color::White,
             selected_match_bg: Color::Magenta,
             status_fg: Color::Black,
@@ -35,20 +27,6 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn hint_style(&self, selected: bool) -> Style {
-        if selected {
-            Style::default()
-                .fg(self.selected_hint_fg)
-                .bg(self.selected_hint_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(self.hint_fg)
-                .bg(self.hint_bg)
-                .add_modifier(Modifier::BOLD)
-        }
-    }
-
     pub fn match_style(&self, selected: bool) -> Style {
         if selected {
             Style::default()
@@ -121,10 +99,10 @@ mod tests {
     fn default_theme_uses_less_harsh_match_colors() {
         let theme = Theme::default();
 
-        assert_eq!(theme.hint_bg, Color::Yellow);
         assert_eq!(theme.match_fg, Color::Yellow);
         assert_eq!(theme.match_bg, None);
-        assert_eq!(theme.selected_hint_bg, Color::Magenta);
+        assert_eq!(theme.selected_match_bg, Color::Magenta);
+        assert_eq!(theme.empty_fg, Color::Yellow);
     }
 
     #[test]

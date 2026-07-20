@@ -77,9 +77,6 @@ impl ExtractApp {
             theme,
         };
         app.refilter();
-        if app.filtered.is_empty() {
-            app.message = Some("no matches".to_string());
-        }
         app
     }
 
@@ -105,7 +102,6 @@ impl ExtractApp {
             ExtractInput::Backspace => {
                 self.query.pop();
                 self.refilter();
-                self.message = None;
                 Outcome::Continue
             }
             ExtractInput::Up => {
@@ -122,7 +118,6 @@ impl ExtractApp {
                 }
                 self.query.push(ch);
                 self.refilter();
-                self.message = None;
                 Outcome::Continue
             }
         }
@@ -169,10 +164,9 @@ impl ExtractApp {
             .collect();
         if self.filtered.is_empty() {
             self.selected = 0;
-            if !self.query.is_empty() {
-                self.message = Some("no matches".to_string());
-            }
+            self.message = Some("no matches".to_string());
         } else {
+            self.message = None;
             self.selected = selected_item
                 .and_then(|item| {
                     self.filtered
@@ -351,5 +345,22 @@ mod tests {
 
         assert_eq!(a.selected_index(), 0);
         assert_eq!(a.selected_item().unwrap().text, "beta-first");
+    }
+
+    #[test]
+    fn no_match_message_survives_typeahead_and_clears_when_matches_return() {
+        let mut a = app(&["alpha-token", "beta-token"]);
+        assert_eq!(a.message(), None);
+
+        a.handle_char('z');
+        assert_eq!(a.filtered_count(), 0);
+        assert_eq!(a.message(), Some("no matches"));
+
+        a.handle_input(ExtractInput::Backspace);
+        assert_eq!(a.filtered_count(), 2);
+        assert_eq!(a.message(), None);
+
+        let empty = ExtractApp::new(Vec::new(), Theme::default());
+        assert_eq!(empty.message(), Some("no matches"));
     }
 }
