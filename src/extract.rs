@@ -56,12 +56,27 @@ pub fn extract_items_from_visible_text_with_wrap_width(
 }
 
 fn extract_items_from_flat(text: &str) -> Vec<ExtractItem> {
+    let mut specialized: Vec<ExtractItem> = Vec::new();
+    specialized.extend(filter_urls(text));
+    specialized.extend(filter_paths(text));
+    specialized.extend(filter_quotes(text));
+    specialized.extend(filter_s_quotes(text));
+
+    // Words are merged last and therefore rank first after reverse. Drop words
+    // covered by a specialized match (strict prefix from charset splits, or the
+    // bare interior of a quote) so typeahead prefers the full Url/Path/Quote.
+    let words: Vec<ExtractItem> = filter_words(text)
+        .into_iter()
+        .filter(|word| {
+            !specialized
+                .iter()
+                .any(|item| word_redundant_with_specialized(&word.text, item))
+        })
+        .collect();
+
     let mut raw: Vec<ExtractItem> = Vec::new();
-    raw.extend(filter_urls(text));
-    raw.extend(filter_paths(text));
-    raw.extend(filter_quotes(text));
-    raw.extend(filter_s_quotes(text));
-    raw.extend(filter_words(text));
+    raw.extend(specialized);
+    raw.extend(words);
 
     raw.reverse();
 
@@ -73,6 +88,18 @@ fn extract_items_from_flat(text: &str) -> Vec<ExtractItem> {
         }
     }
     out
+}
+
+fn word_redundant_with_specialized(word: &str, specialized: &ExtractItem) -> bool {
+    // Exact dup or truncated word charset split (e.g. URL cut at '=').
+    if specialized.text.starts_with(word) {
+        return true;
+    }
+    match specialized.kind {
+        ItemKind::Quote => specialized.text == format!("\"{word}\""),
+        ItemKind::SQuote => specialized.text == format!("'{word}'"),
+        ItemKind::Url | ItemKind::Path | ItemKind::Word => false,
+    }
 }
 
 fn filter_urls(text: &str) -> Vec<ExtractItem> {
@@ -327,6 +354,52 @@ curl https://cdn.example.org/v2/asset.tar.gz
     #[test]
     fn empty_visible_text_extracts_nothing() {
         assert!(extract_items_from_visible_text("").is_empty());
+    }
+
+    #[test]
+    fn specialized_tokens_outrank_truncated_word_prefixes() {
+        let text = "\
+Visit https://example.com/docs/api?v=1 for docs.\n\
+single: 'single-quoted-token'\n\
+double: \"hello-world-value\"\n";
+        let items = extract_items_from_visible_text(text);
+        let t = texts(&items);
+
+        assert!(
+            t.contains(&"https://example.com/docs/api?v=1"),
+            "full URL missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|s| *s == "https://example.com/docs/api?v"),
+            "truncated URL word should be suppressed: {t:?}"
+        );
+        assert!(
+            t.contains(&"'single-quoted-token'"),
+            "single quote missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|s| *s == "single-quoted-token"),
+            "bare single-quote interior should be suppressed: {t:?}"
+        );
+        assert!(
+            t.contains(&"\"hello-world-value\""),
+            "double quote missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|s| *s == "hello-world-value"),
+            "bare double-quote interior should be suppressed: {t:?}"
+        );
+
+        let url = items
+            .iter()
+            .find(|i| i.text == "https://example.com/docs/api?v=1")
+            .expect("url item");
+        assert_eq!(url.kind, ItemKind::Url);
+        let sq = items
+            .iter()
+            .find(|i| i.text == "'single-quoted-token'")
+            .expect("squote item");
+        assert_eq!(sq.kind, ItemKind::SQuote);
     }
 
     #[test]

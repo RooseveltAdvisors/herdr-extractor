@@ -291,6 +291,30 @@ mod tests {
     }
 
     #[test]
+    fn enter_prefers_full_url_and_quote_over_truncated_words() {
+        let text = "\
+Visit https://example.com/docs/api?v=1 for docs.\n\
+single: 'single-quoted-token'\n";
+        let mut a = ExtractApp::from_visible_text(text, Theme::default());
+        for ch in "example.com".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(
+            a.handle_input(ExtractInput::Enter),
+            Outcome::Copy("https://example.com/docs/api?v=1".to_string())
+        );
+
+        let mut a = ExtractApp::from_visible_text(text, Theme::default());
+        for ch in "single-quoted".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(
+            a.handle_input(ExtractInput::Enter),
+            Outcome::Copy("'single-quoted-token'".to_string())
+        );
+    }
+
+    #[test]
     fn esc_cancels() {
         let mut a = app(&["only-item-value"]);
         assert_eq!(a.handle_char('\u{1b}'), Outcome::Cancel);
