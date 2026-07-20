@@ -7,19 +7,10 @@ use serde::Deserialize;
 
 use crate::theme::{parse_color, Theme};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExtractSettings {
     pub copy_toast: bool,
     pub theme: Theme,
-}
-
-impl Default for ExtractSettings {
-    fn default() -> Self {
-        Self {
-            copy_toast: false,
-            theme: Theme::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
