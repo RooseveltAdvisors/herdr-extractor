@@ -370,7 +370,7 @@ double: \"hello-world-value\"\n";
             "full URL missing: {t:?}"
         );
         assert!(
-            !t.iter().any(|s| *s == "https://example.com/docs/api?v"),
+            !t.contains(&"https://example.com/docs/api?v"),
             "truncated URL word should be suppressed: {t:?}"
         );
         assert!(
@@ -378,7 +378,7 @@ double: \"hello-world-value\"\n";
             "single quote missing: {t:?}"
         );
         assert!(
-            !t.iter().any(|s| *s == "single-quoted-token"),
+            !t.contains(&"single-quoted-token"),
             "bare single-quote interior should be suppressed: {t:?}"
         );
         assert!(
@@ -386,7 +386,7 @@ double: \"hello-world-value\"\n";
             "double quote missing: {t:?}"
         );
         assert!(
-            !t.iter().any(|s| *s == "hello-world-value"),
+            !t.contains(&"hello-world-value"),
             "bare double-quote interior should be suppressed: {t:?}"
         );
 
@@ -408,12 +408,7 @@ double: \"hello-world-value\"\n";
             "see path/file.rs /tmp/logs /tmp/app /tmp/foo=bar/apps and 5k/s 12m/s 3b/s page 1/2",
         );
         let paths: Vec<_> = paths.iter().map(|item| item.text.as_str()).collect();
-        for expected in [
-            "path/file.rs",
-            "/tmp/logs",
-            "/tmp/app",
-            "/tmp/foo=bar/apps",
-        ] {
+        for expected in ["path/file.rs", "/tmp/logs", "/tmp/app", "/tmp/foo=bar/apps"] {
             assert!(
                 paths.contains(&expected),
                 "missing legitimate path {expected:?} in {paths:?}"
