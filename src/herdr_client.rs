@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{error::Error, fmt};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -49,6 +50,32 @@ pub struct PaneText {
     pub truncated: bool,
 }
 
+#[derive(Debug)]
+struct RpcError {
+    code: String,
+    message: String,
+}
+
+impl RpcError {
+    fn is_unsupported(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "unsupported_source"
+                | "unsupported-source"
+                | "unsupported_parameter"
+                | "unsupported-parameter"
+        )
+    }
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Herdr API error {}: {}", self.code, self.message)
+    }
+}
+
+impl Error for RpcError {}
+
 impl SocketClient {
     pub fn connect(socket_path: &Path) -> Result<Self> {
         UnixStream::connect(socket_path).with_context(|| {
@@ -69,31 +96,31 @@ impl SocketClient {
 
     /// Read the retained scrollback, falling back to older Herdr read sources.
     pub fn read_scrollback_pane(&mut self, pane_id: &str) -> Result<PaneText> {
-        self.read_pane_source(pane_id, "recent_unwrapped", Some(FULL_SCROLLBACK_LINES))
-            .map(|mut pane| {
+        match self.read_pane_source(pane_id, "recent_unwrapped", Some(FULL_SCROLLBACK_LINES)) {
+            Ok(mut pane) => {
                 pane.source = PaneReadSource::RecentUnwrapped;
-                pane
-            })
-            .or_else(|error| {
+                Ok(pane)
+            }
+            Err(error) if is_unsupported_error(&error) => {
                 eprintln!(
-                    "herdr-extractor: recent_unwrapped read unavailable; trying recent: {error:#}"
+                    "herdr-extractor: recent_unwrapped read unsupported; trying recent: {error:#}"
                 );
-                self.read_pane_source(pane_id, "recent", Some(FULL_SCROLLBACK_LINES))
-                    .map(|mut pane| {
+                match self.read_pane_source(pane_id, "recent", Some(FULL_SCROLLBACK_LINES)) {
+                    Ok(mut pane) => {
                         pane.source = PaneReadSource::Recent;
-                        pane
-                    })
-            })
-            .or_else(|error| {
-                eprintln!(
-                    "herdr-extractor: recent scrollback read unavailable; trying visible: {error:#}"
-                );
-                self.read_pane_source(pane_id, "visible", None)
-                    .map(|mut pane| {
-                        pane.source = PaneReadSource::Visible;
-                        pane
-                    })
-            })
+                        Ok(pane)
+                    }
+                    Err(error) if is_unsupported_error(&error) => {
+                        eprintln!(
+                            "herdr-extractor: recent scrollback read unsupported; trying visible: {error:#}"
+                        );
+                        self.read_pane_source(pane_id, "visible", None)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn read_pane_source(
@@ -173,11 +200,17 @@ impl SocketClient {
         let envelope: Value = serde_json::from_str(&response)
             .with_context(|| format!("Herdr returned invalid JSON for {method}"))?;
         if let Some(error) = envelope.get("error") {
-            bail!(
-                "Herdr API error {}: {}",
-                error["code"].as_str().unwrap_or("unknown_error"),
-                error["message"].as_str().unwrap_or("no message")
-            );
+            return Err(RpcError {
+                code: error["code"]
+                    .as_str()
+                    .unwrap_or("unknown_error")
+                    .to_string(),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("no message")
+                    .to_string(),
+            }
+            .into());
         }
         if envelope["id"].as_str() != Some(&id) {
             bail!("Herdr response id did not match request id {id}");
@@ -187,6 +220,12 @@ impl SocketClient {
             .cloned()
             .context("Herdr response has neither result nor error")
     }
+}
+
+fn is_unsupported_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RpcError>()
+        .is_some_and(RpcError::is_unsupported)
 }
 
 fn expect_type(result: &Value, expected: &str) -> Result<()> {
@@ -270,7 +309,7 @@ mod tests {
             let mut observed = Vec::new();
 
             for response in [
-                "{\"id\":\"1\",\"error\":{\"code\":\"invalid_params\",\"message\":\"unknown source\"}}\n",
+                "{\"id\":\"1\",\"error\":{\"code\":\"unsupported_source\",\"message\":\"unknown source\"}}\n",
                 "{\"id\":\"2\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"older retained token\",\"truncated\":true}}}\n",
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -304,6 +343,40 @@ mod tests {
         assert_eq!(pane.text, "older retained token");
         assert_eq!(pane.source, PaneReadSource::Recent);
         assert!(pane.truncated);
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn does_not_fall_back_on_operational_errors() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            stream
+                .write_all(
+                    b"{\"id\":\"1\",\"error\":{\"code\":\"agent_not_idle\",\"message\":\"pane is busy\"}}\n",
+                )
+                .unwrap();
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let error = client.read_scrollback_pane("w1:p1").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Herdr API error agent_not_idle: pane is busy"
+        );
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
     }
