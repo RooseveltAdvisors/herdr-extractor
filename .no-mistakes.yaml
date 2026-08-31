@@ -1,0 +1,2 @@
+# Trusted default-branch declaration: this repo runs no CI checks.
+no_ci: true
