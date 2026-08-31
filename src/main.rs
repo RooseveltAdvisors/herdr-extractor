@@ -26,20 +26,31 @@ fn run() -> Result<()> {
     let pane_id = context_focused_pane_id()
         .context("HERDR_PLUGIN_CONTEXT_JSON did not include focused_pane_id")?;
     let mut client = SocketClient::connect(Path::new(&socket_path))?;
-    let text = client.read_visible_pane(&pane_id)?;
-    let wrap_width = match client.visible_pane_width(&pane_id) {
-        Ok(width) => Some(visible_wrap_width(width)),
-        Err(error) => {
-            log_state(&format!("pane_width_unavailable: {error:#}"));
-            None
+    let pane_text = client.read_scrollback_pane(&pane_id)?;
+    if pane_text.truncated {
+        log_state("scrollback_truncated=true");
+    }
+    let wrap_width = if pane_text.source.is_unwrapped() {
+        None
+    } else {
+        match client.visible_pane_width(&pane_id) {
+            Ok(width) => Some(visible_wrap_width(width)),
+            Err(error) => {
+                log_state(&format!("pane_width_unavailable: {error:#}"));
+                None
+            }
         }
     };
     let config_dir = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR");
     let settings = load_extract_settings(config_dir.as_deref().map(Path::new))?;
-    let mut app =
-        ExtractApp::from_visible_text_with_wrap_width(&text, wrap_width, settings.theme.clone());
+    let mut app = ExtractApp::from_visible_text_with_wrap_width(
+        &pane_text.text,
+        wrap_width,
+        settings.theme.clone(),
+    );
     log_state(&format!(
-        "start items={} wrap_width={wrap_width:?} copy_toast={}",
+        "start source={} items={} wrap_width={wrap_width:?} copy_toast={}",
+        pane_text.source.name(),
         app.total_count(),
         settings.copy_toast
     ));

@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 const RPC_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const FULL_SCROLLBACK_LINES: u32 = u32::MAX;
 
 #[derive(Debug)]
 pub struct SocketClient {
@@ -18,6 +19,34 @@ pub struct SocketClient {
 pub struct NotificationResult {
     pub shown: bool,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneReadSource {
+    RecentUnwrapped,
+    Recent,
+    Visible,
+}
+
+impl PaneReadSource {
+    pub fn is_unwrapped(self) -> bool {
+        matches!(self, Self::RecentUnwrapped)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::RecentUnwrapped => "recent_unwrapped",
+            Self::Recent => "recent",
+            Self::Visible => "visible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneText {
+    pub text: String,
+    pub source: PaneReadSource,
+    pub truncated: bool,
 }
 
 impl SocketClient {
@@ -35,20 +64,63 @@ impl SocketClient {
     }
 
     pub fn read_visible_pane(&mut self, pane_id: &str) -> Result<String> {
-        let result = self.call(
-            "pane.read",
-            json!({
-                "pane_id": pane_id,
-                "source": "visible",
-                "format": "text",
-                "strip_ansi": true
-            }),
-        )?;
+        Ok(self.read_pane_source(pane_id, "visible", None)?.text)
+    }
+
+    /// Read the retained scrollback, falling back to older Herdr read sources.
+    pub fn read_scrollback_pane(&mut self, pane_id: &str) -> Result<PaneText> {
+        self.read_pane_source(pane_id, "recent_unwrapped", Some(FULL_SCROLLBACK_LINES))
+            .map(|mut pane| {
+                pane.source = PaneReadSource::RecentUnwrapped;
+                pane
+            })
+            .or_else(|error| {
+                eprintln!(
+                    "herdr-extractor: recent_unwrapped read unavailable; trying recent: {error:#}"
+                );
+                self.read_pane_source(pane_id, "recent", Some(FULL_SCROLLBACK_LINES))
+                    .map(|mut pane| {
+                        pane.source = PaneReadSource::Recent;
+                        pane
+                    })
+            })
+            .or_else(|error| {
+                eprintln!(
+                    "herdr-extractor: recent scrollback read unavailable; trying visible: {error:#}"
+                );
+                self.read_pane_source(pane_id, "visible", None)
+                    .map(|mut pane| {
+                        pane.source = PaneReadSource::Visible;
+                        pane
+                    })
+            })
+    }
+
+    fn read_pane_source(
+        &mut self,
+        pane_id: &str,
+        source: &str,
+        lines: Option<u32>,
+    ) -> Result<PaneText> {
+        let mut params = json!({
+            "pane_id": pane_id,
+            "source": source,
+            "format": "text",
+            "strip_ansi": true
+        });
+        if let Some(lines) = lines {
+            params["lines"] = json!(lines);
+        }
+        let result = self.call("pane.read", params)?;
         expect_type(&result, "pane_read")?;
-        Ok(result["read"]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string())
+        Ok(PaneText {
+            text: result["read"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            source: PaneReadSource::Visible,
+            truncated: result["read"]["truncated"].as_bool().unwrap_or(false),
+        })
     }
 
     pub fn visible_pane_width(&mut self, pane_id: &str) -> Result<usize> {
@@ -149,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_visible_text_and_layout_width() {
+    fn reads_full_unwrapped_scrollback() {
         let path = socket_path();
         let listener = UnixListener::bind(&path).unwrap();
         let handle = std::thread::spawn(move || {
@@ -161,9 +233,10 @@ mod tests {
                 .unwrap();
             let request: Value = serde_json::from_str(&request_line).unwrap();
             assert_eq!(request["method"], "pane.read");
-            assert_eq!(request["params"]["source"], "visible");
+            assert_eq!(request["params"]["source"], "recent_unwrapped");
+            assert_eq!(request["params"]["lines"], u32::MAX);
             stream
-                .write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"visible\"}}}\n")
+                .write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"scrollback\",\"truncated\":false}}}\n")
                 .unwrap();
 
             let (mut stream, _) = listener.accept().unwrap();
@@ -179,7 +252,10 @@ mod tests {
         });
 
         let mut client = SocketClient::connect(&path).unwrap();
-        assert_eq!(client.read_visible_pane("w1:p1").unwrap(), "visible");
+        let pane = client.read_scrollback_pane("w1:p1").unwrap();
+        assert_eq!(pane.text, "scrollback");
+        assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
+        assert!(!pane.truncated);
         assert_eq!(client.visible_pane_width("w1:p1").unwrap(), 80);
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
