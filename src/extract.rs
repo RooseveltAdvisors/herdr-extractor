@@ -1,6 +1,6 @@
-//! Visible-buffer token extraction (extrakto-parity subset).
+//! Scrollback token extraction (extrakto-parity subset).
 //!
-//! Pure logic: bounded URL / path / quote / word extraction from visible text with
+//! Pure logic: bounded URL / path / quote / word extraction from pane text with
 //! reverse + ordered dedupe. No socket or TTY.
 
 use regex::Regex;
@@ -18,7 +18,7 @@ pub enum ItemKind {
     Word,
 }
 
-/// One copy-eligible token from the visible buffer.
+/// One copy-eligible token from pane scrollback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractItem {
     pub text: String,
@@ -27,10 +27,10 @@ pub struct ExtractItem {
 
 const MIN_LENGTH: usize = 5;
 
-/// Extract the v1 item set from already-visible pane text.
+/// Extract the v1 item set from pane text.
 ///
 /// Default list = path ∪ url ∪ quote ∪ s-quote ∪ word (min length 5), reversed so
-/// lower/more-recent screen content appears first, then deduped preserving order.
+/// lower/more-recent pane content appears first, then deduped preserving order.
 pub fn extract_items_from_visible_text(text: &str) -> Vec<ExtractItem> {
     extract_items_from_flat(text)
 }

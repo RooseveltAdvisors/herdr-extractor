@@ -2,7 +2,7 @@ id = "RooseveltAdvisors.herdr-extractor"
 name = "herdr-extractor"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
-description = "extrakto-inspired visible-buffer token extraction for Herdr; credits laktak/extrakto"
+description = "extrakto-inspired scrollback token extraction for Herdr; credits laktak/extrakto"
 platforms = ["linux", "macos"]
 
 [[build]]
@@ -10,8 +10,8 @@ command = ["cargo", "build", "--release", "--locked"]
 
 [[actions]]
 id = "extract"
-title = "Extract visible tokens"
-description = "List URLs, paths, quotes, and words from the visible pane and copy one"
+title = "Extract scrollback tokens"
+description = "List URLs, paths, quotes, and words from pane scrollback and copy one"
 command = ["./scripts/open-extractor"]
 
 [[panes]]
