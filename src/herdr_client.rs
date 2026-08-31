@@ -57,13 +57,17 @@ struct RpcError {
 }
 
 impl RpcError {
-    fn is_unsupported(&self) -> bool {
+    fn is_unsupported_source(&self) -> bool {
         matches!(
             self.code.as_str(),
-            "unsupported_source"
-                | "unsupported-source"
-                | "unsupported_parameter"
-                | "unsupported-parameter"
+            "unsupported_source" | "unsupported-source"
+        )
+    }
+
+    fn is_unsupported_parameter(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "unsupported_parameter" | "unsupported-parameter"
         )
     }
 }
@@ -96,21 +100,21 @@ impl SocketClient {
 
     /// Read the retained scrollback, falling back to older Herdr read sources.
     pub fn read_scrollback_pane(&mut self, pane_id: &str) -> Result<PaneText> {
-        match self.read_pane_source(pane_id, "recent_unwrapped", Some(FULL_SCROLLBACK_LINES)) {
+        match self.read_scrollback_source(pane_id, "recent_unwrapped") {
             Ok(mut pane) => {
                 pane.source = PaneReadSource::RecentUnwrapped;
                 Ok(pane)
             }
-            Err(error) if is_unsupported_error(&error) => {
+            Err(error) if is_unsupported_source_error(&error) => {
                 eprintln!(
                     "herdr-extractor: recent_unwrapped read unsupported; trying recent: {error:#}"
                 );
-                match self.read_pane_source(pane_id, "recent", Some(FULL_SCROLLBACK_LINES)) {
+                match self.read_scrollback_source(pane_id, "recent") {
                     Ok(mut pane) => {
                         pane.source = PaneReadSource::Recent;
                         Ok(pane)
                     }
-                    Err(error) if is_unsupported_error(&error) => {
+                    Err(error) if is_unsupported_source_error(&error) => {
                         eprintln!(
                             "herdr-extractor: recent scrollback read unsupported; trying visible: {error:#}"
                         );
@@ -120,6 +124,18 @@ impl SocketClient {
                 }
             }
             Err(error) => Err(error),
+        }
+    }
+
+    fn read_scrollback_source(&mut self, pane_id: &str, source: &str) -> Result<PaneText> {
+        match self.read_pane_source(pane_id, source, Some(FULL_SCROLLBACK_LINES)) {
+            Err(error) if is_unsupported_parameter_error(&error) => {
+                eprintln!(
+                    "herdr-extractor: {source} lines parameter unsupported; retrying without it: {error:#}"
+                );
+                self.read_pane_source(pane_id, source, None)
+            }
+            result => result,
         }
     }
 
@@ -222,10 +238,16 @@ impl SocketClient {
     }
 }
 
-fn is_unsupported_error(error: &anyhow::Error) -> bool {
+fn is_unsupported_source_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RpcError>()
-        .is_some_and(RpcError::is_unsupported)
+        .is_some_and(RpcError::is_unsupported_source)
+}
+
+fn is_unsupported_parameter_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RpcError>()
+        .is_some_and(RpcError::is_unsupported_parameter)
 }
 
 fn expect_type(result: &Value, expected: &str) -> Result<()> {
@@ -343,6 +365,41 @@ mod tests {
         assert_eq!(pane.text, "older retained token");
         assert_eq!(pane.source, PaneReadSource::Recent);
         assert!(pane.truncated);
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn retries_same_source_without_unsupported_lines_parameter() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let mut observed = Vec::new();
+
+            for response in [
+                "{\"id\":\"1\",\"error\":{\"code\":\"unsupported_parameter\",\"message\":\"unknown lines parameter\"}}\n",
+                "{\"id\":\"2\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"retained token\",\"truncated\":false}}}\n",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request_line)
+                    .unwrap();
+                observed.push(serde_json::from_str::<Value>(&request_line).unwrap());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+
+            assert_eq!(observed[0]["params"]["source"], "recent_unwrapped");
+            assert_eq!(observed[0]["params"]["lines"], u32::MAX);
+            assert_eq!(observed[1]["params"]["source"], "recent_unwrapped");
+            assert!(observed[1]["params"].get("lines").is_none());
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let pane = client.read_scrollback_pane("w1:p1").unwrap();
+        assert_eq!(pane.text, "retained token");
+        assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
     }
