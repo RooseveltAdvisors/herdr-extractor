@@ -260,4 +260,51 @@ mod tests {
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn falls_back_to_recent_without_issuing_scroll_commands() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let mut observed = Vec::new();
+
+            for response in [
+                "{\"id\":\"1\",\"error\":{\"code\":\"invalid_params\",\"message\":\"unknown source\"}}\n",
+                "{\"id\":\"2\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"older retained token\",\"truncated\":true}}}\n",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request_line)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&request_line).unwrap();
+                observed.push(request.clone());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+
+            let methods: Vec<_> = observed
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect();
+            let sources: Vec<_> = observed
+                .iter()
+                .map(|request| request["params"]["source"].as_str().unwrap())
+                .collect();
+            println!("Herdr requests: methods={methods:?} sources={sources:?}");
+            assert_eq!(methods, ["pane.read", "pane.read"]);
+            assert_eq!(sources, ["recent_unwrapped", "recent"]);
+            assert!(observed
+                .iter()
+                .all(|request| request["params"]["lines"] == u32::MAX));
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let pane = client.read_scrollback_pane("w1:p1").unwrap();
+        assert_eq!(pane.text, "older retained token");
+        assert_eq!(pane.source, PaneReadSource::Recent);
+        assert!(pane.truncated);
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
 }

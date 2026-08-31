@@ -3,7 +3,7 @@ name = "herdr-extractor"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "extrakto-inspired visible-buffer token extraction for Herdr"
+description = "extrakto-inspired scrollback token extraction for Herdr"
 license = "MIT"
 authors = ["Roosevelt Advisors"]
 

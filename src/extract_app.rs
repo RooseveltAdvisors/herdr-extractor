@@ -1,4 +1,4 @@
-//! Interactive typeahead list for the visible-buffer extractor.
+//! Interactive typeahead list for the scrollback extractor.
 //!
 //! Pure state machine: filter items by query, move the selection, copy or cancel.
 //! No terminal I/O — fully unit-testable.

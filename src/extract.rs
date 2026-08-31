@@ -1,6 +1,6 @@
-//! Visible-buffer token extraction (extrakto-parity subset).
+//! Scrollback token extraction (extrakto-parity subset).
 //!
-//! Pure logic: bounded URL / path / quote / word extraction from visible text with
+//! Pure logic: bounded URL / path / quote / word extraction from pane text with
 //! reverse + ordered dedupe. No socket or TTY.
 
 use regex::Regex;
@@ -18,7 +18,7 @@ pub enum ItemKind {
     Word,
 }
 
-/// One copy-eligible token from the visible buffer.
+/// One copy-eligible token from pane scrollback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractItem {
     pub text: String,
