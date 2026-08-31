@@ -27,10 +27,10 @@ pub struct ExtractItem {
 
 const MIN_LENGTH: usize = 5;
 
-/// Extract the v1 item set from already-visible pane text.
+/// Extract the v1 item set from pane text.
 ///
 /// Default list = path ∪ url ∪ quote ∪ s-quote ∪ word (min length 5), reversed so
-/// lower/more-recent screen content appears first, then deduped preserving order.
+/// lower/more-recent pane content appears first, then deduped preserving order.
 pub fn extract_items_from_visible_text(text: &str) -> Vec<ExtractItem> {
     extract_items_from_flat(text)
 }

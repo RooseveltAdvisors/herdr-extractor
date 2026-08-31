@@ -13,9 +13,10 @@ invention. It adapts extrakto's token-picking lineage to Herdr's scrollback and 
 
 `RooseveltAdvisors.herdr-extractor.extract` opens the `extract` overlay entrypoint.
 
-1. The plugin calls `pane.read` with `source = "recent_unwrapped"` and the largest supported
-   line bound, so text found while reading copy mode remains available after returning to normal
-   mode. Older Herdr versions fall back to `recent`, then `visible`.
+1. The plugin calls `pane.read` with `source = "recent_unwrapped"` and requests the maximum line
+   bound when that parameter is supported, so text found while reading copy mode remains available
+   after returning to normal mode. Older Herdr versions fall back to `recent`, then `visible`, only
+   when a source is unsupported.
 2. Herdr supplies logical lines for `recent_unwrapped`; fallback sources use the pane layout width.
 3. A bounded extrakto-parity set collects URLs, paths, double/single quotes, and words of at least
    five characters. Lower/recent results come first and duplicates are removed.
