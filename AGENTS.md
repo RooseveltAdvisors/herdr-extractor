@@ -25,6 +25,10 @@ cargo build --release --locked
 cargo clippy --all-targets -- -D warnings
 ```
 
+For independent runtime proof, use `.claude/skills/verify/SKILL.md` from a committed feature
+branch. Its Herdr lab must use a scrubbed temporary home/config/state and a throwaway tmux socket;
+never exercise the plugin against the operator's default session or real scrollback.
+
 Never commit `target/`, runtime logs, or local editor files.
 
 ## Maintaining this file
