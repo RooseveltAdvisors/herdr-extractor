@@ -7,6 +7,8 @@ use std::{error::Error, fmt};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+use crate::session_history;
+
 const RPC_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const FULL_SCROLLBACK_LINES: u32 = u32::MAX;
 
@@ -27,11 +29,12 @@ pub enum PaneReadSource {
     RecentUnwrapped,
     Recent,
     Visible,
+    SessionHistory,
 }
 
 impl PaneReadSource {
     pub fn is_unwrapped(self) -> bool {
-        matches!(self, Self::RecentUnwrapped)
+        matches!(self, Self::RecentUnwrapped | Self::SessionHistory)
     }
 
     pub fn name(self) -> &'static str {
@@ -39,6 +42,7 @@ impl PaneReadSource {
             Self::RecentUnwrapped => "recent_unwrapped",
             Self::Recent => "recent",
             Self::Visible => "visible",
+            Self::SessionHistory => "session_history",
         }
     }
 }
@@ -110,6 +114,25 @@ impl SocketClient {
 
     pub fn read_visible_pane(&mut self, pane_id: &str) -> Result<String> {
         Ok(self.read_pane_source(pane_id, "visible", None)?.text)
+    }
+
+    /// Read the pane's persisted session history when Herdr saves it
+    /// (`experimental.pane_history = true`). The saved history holds the pane's
+    /// full retained scrollback, which the server-capped `pane.read` transcript
+    /// (1000 lines) cannot cover. Returns `Ok(None)` when Herdr has no usable
+    /// saved history for the pane; callers fall back to `read_transcript_pane`.
+    pub fn read_session_history_pane(&self, pane_id: &str) -> Result<Option<PaneText>> {
+        let Some(data_dir) = self.socket_path.parent() else {
+            return Ok(None);
+        };
+        let Some(text) = session_history::load_pane_history(data_dir, pane_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(PaneText {
+            text,
+            source: PaneReadSource::SessionHistory,
+            truncated: false,
+        }))
     }
 
     /// Read the full retained session transcript through `recent_unwrapped`.
@@ -446,6 +469,44 @@ mod tests {
         assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn session_history_read_comes_from_the_socket_data_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("herdr-extractor-client-{unique}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let path = data_dir.join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+        });
+        std::fs::write(
+            data_dir.join("session.json"),
+            r#"{"version":3,"workspaces":[{"id":"w1","public_pane_numbers":{"9":1}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("session-history.json"),
+            format!(
+                r#"{{"version":3,"workspaces":[{{"tabs":[{{"panes":{{"9":{{"ansi":{},"lines":2}}}}}}]}}]}}"#,
+                serde_json::to_string("early https://saved.example/link\r\nlate filler").unwrap()
+            ),
+        )
+        .unwrap();
+
+        let client = SocketClient::connect(&path).unwrap();
+        let pane = client.read_session_history_pane("w1:p1").unwrap().unwrap();
+        assert_eq!(pane.source, PaneReadSource::SessionHistory);
+        assert!(pane.source.is_unwrapped());
+        assert!(!pane.truncated);
+        assert!(pane.text.contains("https://saved.example/link"));
+        assert!(client.read_session_history_pane("w1:p2").unwrap().is_none());
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
