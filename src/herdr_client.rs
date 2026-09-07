@@ -43,6 +43,20 @@ impl PaneReadSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneScroll {
+    pub max_offset_from_bottom: u64,
+    pub viewport_rows: u64,
+}
+
+impl PaneScroll {
+    /// True when the pane keeps no host scrollback above the viewport, for
+    /// example while an alt-screen TUI owns the pane.
+    pub fn has_retained_history(self) -> bool {
+        self.max_offset_from_bottom > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneText {
     pub text: String,
@@ -96,6 +110,36 @@ impl SocketClient {
 
     pub fn read_visible_pane(&mut self, pane_id: &str) -> Result<String> {
         Ok(self.read_pane_source(pane_id, "visible", None)?.text)
+    }
+
+    /// Read the full retained session transcript through `recent_unwrapped`.
+    ///
+    /// Unlike `read_scrollback_pane` this never degrades to viewport-shaped
+    /// sources (`recent`, `visible`): a transcript read on a Herdr that lacks
+    /// `recent_unwrapped` fails instead of silently pretending the viewport is
+    /// the session. The server applies its own maximum line bound.
+    pub fn read_transcript_pane(&mut self, pane_id: &str) -> Result<PaneText> {
+        let mut pane = self.read_scrollback_source(pane_id, "recent_unwrapped")?;
+        pane.source = PaneReadSource::RecentUnwrapped;
+        Ok(pane)
+    }
+
+    /// Report the pane's scroll state so callers can tell a real transcript
+    /// read from a pane that retains no host scrollback (alt-screen panes).
+    pub fn pane_scroll(&mut self, pane_id: &str) -> Result<PaneScroll> {
+        let result = self.call("pane.get", json!({ "pane_id": pane_id }))?;
+        expect_type(&result, "pane_info")?;
+        let pane = &result["pane"];
+        let max_offset_from_bottom = pane["scroll"]["max_offset_from_bottom"]
+            .as_u64()
+            .context("pane_info result did not include scroll max_offset_from_bottom")?;
+        let viewport_rows = pane["scroll"]["viewport_rows"]
+            .as_u64()
+            .context("pane_info result did not include scroll viewport_rows")?;
+        Ok(PaneScroll {
+            max_offset_from_bottom,
+            viewport_rows,
+        })
     }
 
     /// Read the retained scrollback, falling back to older Herdr read sources.
@@ -400,6 +444,108 @@ mod tests {
         let pane = client.read_scrollback_pane("w1:p1").unwrap();
         assert_eq!(pane.text, "retained token");
         assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transcript_read_uses_unwrapped_source_and_never_falls_back_to_viewport() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request["method"], "pane.read");
+            assert_eq!(request["params"]["source"], "recent_unwrapped");
+            assert_eq!(request["params"]["lines"], u32::MAX);
+            stream
+                .write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"pane_read\",\"read\":{\"text\":\"transcript\",\"truncated\":true}}}\n")
+                .unwrap();
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let pane = client.read_transcript_pane("w1:p1").unwrap();
+        assert_eq!(pane.text, "transcript");
+        assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
+        assert!(pane.truncated);
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transcript_read_fails_when_unwrapped_source_is_unsupported() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request["params"]["source"], "recent_unwrapped");
+            stream
+                .write_all(b"{\"id\":\"1\",\"error\":{\"code\":\"unsupported_source\",\"message\":\"unknown source\"}}\n")
+                .unwrap();
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let error = client.read_transcript_pane("w1:p1").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Herdr API error unsupported_source: unknown source"
+        );
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pane_scroll_reads_retained_history_signal() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let _probe = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request_line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request["method"], "pane.get");
+            assert_eq!(request["params"]["pane_id"], "w1:p1");
+            stream
+                .write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"pane_info\",\"pane\":{\"pane_id\":\"w1:p1\",\"scroll\":{\"max_offset_from_bottom\":2965,\"offset_from_bottom\":0,\"viewport_rows\":39}}}}\n")
+                .unwrap();
+        });
+
+        let mut client = SocketClient::connect(&path).unwrap();
+        let scroll = client.pane_scroll("w1:p1").unwrap();
+        assert_eq!(scroll.max_offset_from_bottom, 2965);
+        assert_eq!(scroll.viewport_rows, 39);
+        assert!(scroll.has_retained_history());
+        assert!(!PaneScroll {
+            max_offset_from_bottom: 0,
+            viewport_rows: 39,
+        }
+        .has_retained_history());
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
     }

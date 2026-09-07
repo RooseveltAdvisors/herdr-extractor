@@ -9,6 +9,13 @@ use herdr_extractor::extract_app::{ExtractApp, ExtractInput};
 use herdr_extractor::herdr_client::{context_focused_pane_id, SocketClient};
 use herdr_extractor::Outcome;
 
+const TRANSCRIPT_ENTRYPOINT: &str = "extract-transcript";
+
+/// True when the plugin pane was opened through the transcript entrypoint.
+fn is_transcript_entrypoint(entrypoint: Option<&str>) -> bool {
+    entrypoint == Some(TRANSCRIPT_ENTRYPOINT)
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -25,8 +32,22 @@ fn run() -> Result<()> {
         .context("HERDR_SOCKET_PATH is not set; open this through the Herdr plugin action")?;
     let pane_id = context_focused_pane_id()
         .context("HERDR_PLUGIN_CONTEXT_JSON did not include focused_pane_id")?;
+    let transcript_mode =
+        is_transcript_entrypoint(std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID").ok().as_deref());
     let mut client = SocketClient::connect(Path::new(&socket_path))?;
-    let pane_text = client.read_scrollback_pane(&pane_id)?;
+    let (pane_text, no_retained_history) = if transcript_mode {
+        let text = client.read_transcript_pane(&pane_id)?;
+        let empty_history = match client.pane_scroll(&pane_id) {
+            Ok(scroll) => !scroll.has_retained_history(),
+            Err(error) => {
+                log_state(&format!("pane_scroll_unavailable: {error:#}"));
+                false
+            }
+        };
+        (text, empty_history)
+    } else {
+        (client.read_scrollback_pane(&pane_id)?, false)
+    };
     if pane_text.truncated {
         log_state("scrollback_truncated=true");
     }
@@ -49,11 +70,28 @@ fn run() -> Result<()> {
         settings.theme.clone(),
     );
     log_state(&format!(
-        "start source={} items={} wrap_width={wrap_width:?} copy_toast={}",
+        "start mode={} source={} items={} wrap_width={wrap_width:?} no_retained_history={no_retained_history} copy_toast={}",
+        if transcript_mode { "transcript" } else { "scrollback" },
         pane_text.source.name(),
         app.total_count(),
         settings.copy_toast
     ));
+    if no_retained_history {
+        log_state(
+            "transcript_note: pane retains no host scrollback (alt-screen pane?); extracted viewport content only",
+        );
+        if settings.copy_toast {
+            match client
+                .show_notification("herdr-extractor: pane keeps no host scrollback; viewport only")
+            {
+                Ok(result) if !result.shown => {
+                    log_state(&format!("notification_not_shown reason={}", result.reason));
+                }
+                Ok(_) => {}
+                Err(error) => log_state(&format!("notification_error: {error:#}")),
+            }
+        }
+    }
 
     let outcome = run_tui(&mut app)?;
     log_state(&format!("outcome={outcome:?}"));
@@ -157,18 +195,28 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn manifest_owns_only_the_extractor_action_and_pane() {
+    fn manifest_owns_the_extractor_actions_and_panes() {
         let value: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
         assert_eq!(
             value.get("id").and_then(|id| id.as_str()),
             Some("RooseveltAdvisors.herdr-extractor")
         );
         let actions = value["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
         assert_eq!(actions[0]["id"].as_str(), Some("extract"));
+        assert_eq!(actions[1]["id"].as_str(), Some("extract_transcript"));
+        assert_eq!(
+            actions[1]["command"].as_array().unwrap()[1].as_str(),
+            Some("extract-transcript")
+        );
         let panes = value["panes"].as_array().unwrap();
-        assert_eq!(panes.len(), 1);
+        assert_eq!(panes.len(), 2);
         assert_eq!(panes[0]["id"].as_str(), Some("extract"));
+        assert_eq!(panes[1]["id"].as_str(), Some("extract-transcript"));
+        assert_eq!(
+            panes[1]["command"].as_array().unwrap()[0].as_str(),
+            Some("./target/release/herdr-extractor")
+        );
     }
 
     #[test]
@@ -177,6 +225,20 @@ mod tests {
         assert!(script.contains("[ -x \"$HERDR_BIN_PATH\" ]"));
         assert!(script.contains("command -v herdr"));
         assert!(script.contains("RooseveltAdvisors.herdr-extractor"));
+    }
+
+    #[test]
+    fn launcher_defaults_to_extract_and_accepts_the_transcript_entrypoint() {
+        let script = include_str!("../scripts/open-extractor");
+        assert!(script.contains("entrypoint=${1:-extract}"));
+        assert!(script.contains("extract|extract-transcript) ;;"));
+    }
+
+    #[test]
+    fn transcript_mode_follows_the_transcript_entrypoint() {
+        assert!(is_transcript_entrypoint(Some("extract-transcript")));
+        assert!(!is_transcript_entrypoint(Some("extract")));
+        assert!(!is_transcript_entrypoint(None));
     }
 
     #[test]

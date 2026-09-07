@@ -14,8 +14,20 @@ title = "Extract scrollback tokens"
 description = "List URLs, paths, quotes, and words from pane scrollback and copy one"
 command = ["./scripts/open-extractor"]
 
+[[actions]]
+id = "extract_transcript"
+title = "Extract session transcript tokens"
+description = "List URLs, paths, quotes, and words from the pane's full retained session transcript and copy one"
+command = ["./scripts/open-extractor", "extract-transcript"]
+
 [[panes]]
 id = "extract"
 title = "herdr-extractor"
+placement = "overlay"
+command = ["./target/release/herdr-extractor"]
+
+[[panes]]
+id = "extract-transcript"
+title = "herdr-extractor (transcript)"
 placement = "overlay"
 command = ["./target/release/herdr-extractor"]
