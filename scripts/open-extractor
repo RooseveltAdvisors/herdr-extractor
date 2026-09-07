@@ -1,7 +1,19 @@
 #!/bin/sh
 # Prefer the invoking server binary, but fall back when Linux reports a replaced
 # executable as "... (deleted)" in HERDR_BIN_PATH.
+#
+# Usage: open-extractor [entrypoint-id]
+# The entrypoint id must match a [[panes]] id in herdr-plugin.toml.
 set -eu
+
+entrypoint=${1:-extract}
+case "$entrypoint" in
+    extract|extract-transcript) ;;
+    *)
+        echo "herdr-extractor: unknown entrypoint '$entrypoint'" >&2
+        exit 64
+        ;;
+esac
 
 if [ -n "${HERDR_BIN_PATH:-}" ] && [ -x "$HERDR_BIN_PATH" ]; then
     herdr_cli=$HERDR_BIN_PATH
@@ -14,4 +26,4 @@ fi
 
 exec "$herdr_cli" plugin pane open \
     --plugin RooseveltAdvisors.herdr-extractor \
-    --entrypoint extract
+    --entrypoint "$entrypoint"
