@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use herdr_extractor::clipboard::copy_to_clipboard;
 use herdr_extractor::config::load_extract_settings;
-use herdr_extractor::extract_app::{ExtractApp, ExtractInput};
-use herdr_extractor::herdr_client::{context_focused_pane_id, SocketClient};
+use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode};
+use herdr_extractor::herdr_client::{context_focused_pane_id, PaneText, SocketClient};
 use herdr_extractor::Outcome;
 
 const TRANSCRIPT_ENTRYPOINT: &str = "extract-transcript";
@@ -34,92 +34,37 @@ fn run() -> Result<()> {
         .context("HERDR_PLUGIN_CONTEXT_JSON did not include focused_pane_id")?;
     let transcript_mode =
         is_transcript_entrypoint(std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID").ok().as_deref());
+    let initial_mode = if transcript_mode {
+        ExtractMode::Global
+    } else {
+        ExtractMode::Scrollback
+    };
     let mut client = SocketClient::connect(Path::new(&socket_path))?;
-    let (pane_text, no_retained_history) = if transcript_mode {
-        match client.read_session_history_pane(&pane_id) {
-            Ok(Some(history)) => (history, false),
-            fallback => {
-                if let Err(error) = &fallback {
-                    log_state(&format!("session_history_error: {error:#}"));
-                }
-                let text = client.read_transcript_pane(&pane_id)?;
-                if text.truncated {
-                    log_state(&format!(
-                        "transcript_note: server capped the transcript read at 1000 lines; covered {} lines; full-session coverage needs experimental.pane_history = true in the herdr config",
-                        text.text.lines().count()
-                    ));
-                }
-                let empty_history = match client.pane_scroll(&pane_id) {
-                    Ok(scroll) => !scroll.has_retained_history(),
-                    Err(error) => {
-                        log_state(&format!("pane_scroll_unavailable: {error:#}"));
-                        false
-                    }
-                };
-                (text, empty_history)
-            }
-        }
-    } else {
-        (client.read_scrollback_pane(&pane_id)?, false)
-    };
-    if pane_text.truncated {
-        log_state("scrollback_truncated=true");
-    }
-    let wrap_width = if pane_text.source.is_unwrapped() {
-        None
-    } else {
-        match client.visible_pane_width(&pane_id) {
-            Ok(width) => Some(visible_wrap_width(width)),
-            Err(error) => {
-                log_state(&format!("pane_width_unavailable: {error:#}"));
-                None
-            }
-        }
-    };
     let config_dir = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR");
     let settings = load_extract_settings(config_dir.as_deref().map(Path::new))?;
-    let mut app = ExtractApp::from_visible_text_with_wrap_width(
-        &pane_text.text,
-        wrap_width,
+    let load = load_mode(&mut client, &pane_id, initial_mode, settings.copy_toast)?;
+    if load.text.truncated {
+        log_state("scrollback_truncated=true");
+    }
+    let mut app = ExtractApp::new(
+        herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
+            &load.text.text,
+            load.wrap_width,
+        ),
         settings.theme.clone(),
-    );
+    )
+    .in_mode(initial_mode);
     log_state(&format!(
-        "start mode={} source={} items={} wrap_width={wrap_width:?} no_retained_history={no_retained_history} copy_toast={}",
-        if transcript_mode { "transcript" } else { "scrollback" },
-        pane_text.source.name(),
+        "start mode={} source={} items={} wrap_width={:?} no_retained_history={} copy_toast={}",
+        initial_mode.name(),
+        load.text.source.name(),
         app.total_count(),
+        load.wrap_width,
+        load.no_retained_history,
         settings.copy_toast
     ));
-    if no_retained_history {
-        log_state(
-            "transcript_note: pane retains no host scrollback (alt-screen pane?); extracted viewport content only",
-        );
-        if settings.copy_toast {
-            match client
-                .show_notification("herdr-extractor: pane keeps no host scrollback; viewport only")
-            {
-                Ok(result) if !result.shown => {
-                    log_state(&format!("notification_not_shown reason={}", result.reason));
-                }
-                Ok(_) => {}
-                Err(error) => log_state(&format!("notification_error: {error:#}")),
-            }
-        }
-    }
 
-    if transcript_mode && pane_text.truncated && settings.copy_toast {
-        match client.show_notification(
-            "herdr-extractor: transcript limited to the last 1000 lines; set experimental.pane_history = true in herdr config for full-session coverage",
-        ) {
-            Ok(result) if !result.shown => {
-                log_state(&format!("notification_not_shown reason={}", result.reason));
-            }
-            Ok(_) => {}
-            Err(error) => log_state(&format!("notification_error: {error:#}")),
-        }
-    }
-
-    let outcome = run_tui(&mut app)?;
+    let outcome = run_tui(&mut app, &mut client, &pane_id, settings.copy_toast)?;
     log_state(&format!("outcome={outcome:?}"));
     if let Outcome::Copy(text) = outcome {
         copy_to_clipboard(&text)?;
@@ -136,7 +81,12 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_tui(app: &mut ExtractApp) -> Result<Outcome> {
+fn run_tui(
+    app: &mut ExtractApp,
+    client: &mut SocketClient,
+    pane_id: &str,
+    copy_toast: bool,
+) -> Result<Outcome> {
     let _restore = TerminalRestore;
     let mut terminal = ratatui::init();
     loop {
@@ -146,6 +96,38 @@ fn run_tui(app: &mut ExtractApp) -> Result<Outcome> {
                 if let Some(input) = key_to_input(key) {
                     match app.handle_input(input) {
                         Outcome::Continue => {}
+                        Outcome::SwitchMode(mode) => {
+                            app.set_message(Some(format!("reading {} history...", mode.name())));
+                            terminal.draw(|frame| herdr_extractor::extract_ui::draw(frame, app))?;
+                            match load_mode(client, pane_id, mode, copy_toast) {
+                                Ok(load) => {
+                                    if load.text.truncated {
+                                        log_state("scrollback_truncated=true");
+                                    }
+                                    let items =
+                                        herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
+                                            &load.text.text,
+                                            load.wrap_width,
+                                        );
+                                    app.apply_mode(mode, items);
+                                    log_state(&format!(
+                                        "mode_switch mode={} source={} items={} wrap_width={:?} no_retained_history={}",
+                                        mode.name(),
+                                        load.text.source.name(),
+                                        app.total_count(),
+                                        load.wrap_width,
+                                        load.no_retained_history,
+                                    ));
+                                }
+                                Err(error) => {
+                                    log_state(&format!(
+                                        "mode_switch_error mode={}: {error:#}",
+                                        mode.name()
+                                    ));
+                                    app.set_message(Some("mode read failed".to_string()));
+                                }
+                            }
+                        }
                         other => return Ok(other),
                     }
                 }
@@ -156,10 +138,108 @@ fn run_tui(app: &mut ExtractApp) -> Result<Outcome> {
     }
 }
 
+/// Everything one mode read contributes to the picker.
+struct ModeLoad {
+    text: PaneText,
+    wrap_width: Option<usize>,
+    no_retained_history: bool,
+}
+
+/// Read the pane text for a data mode.
+///
+/// Scrollback mode reads the retained scrollback (with the viewport-width
+/// fallback unwrap). Global mode prefers the pane's full saved session
+/// history and falls back to the server-capped `recent_unwrapped` transcript,
+/// never degrading to viewport-shaped sources.
+fn load_mode(
+    client: &mut SocketClient,
+    pane_id: &str,
+    mode: ExtractMode,
+    copy_toast: bool,
+) -> Result<ModeLoad> {
+    match mode {
+        ExtractMode::Scrollback => {
+            let text = client.read_scrollback_pane(pane_id)?;
+            let wrap_width = if text.source.is_unwrapped() {
+                None
+            } else {
+                match client.visible_pane_width(pane_id) {
+                    Ok(width) => Some(visible_wrap_width(width)),
+                    Err(error) => {
+                        log_state(&format!("pane_width_unavailable: {error:#}"));
+                        None
+                    }
+                }
+            };
+            Ok(ModeLoad {
+                text,
+                wrap_width,
+                no_retained_history: false,
+            })
+        }
+        ExtractMode::Global => {
+            if let Some(history) = client.read_session_history_pane(pane_id)? {
+                return Ok(ModeLoad {
+                    text: history,
+                    wrap_width: None,
+                    no_retained_history: false,
+                });
+            }
+            let text = client.read_transcript_pane(pane_id)?;
+            if text.truncated {
+                log_state(&format!(
+                    "transcript_note: server capped the transcript read at 1000 lines; covered {} lines; full-session coverage needs experimental.pane_history = true in the herdr config",
+                    text.text.lines().count()
+                ));
+                if copy_toast {
+                    show_notification(
+                        client,
+                        "herdr-extractor: transcript limited to the last 1000 lines; set experimental.pane_history = true in herdr config for full-session coverage",
+                    );
+                }
+            }
+            let no_retained_history = match client.pane_scroll(pane_id) {
+                Ok(scroll) => !scroll.has_retained_history(),
+                Err(error) => {
+                    log_state(&format!("pane_scroll_unavailable: {error:#}"));
+                    false
+                }
+            };
+            if no_retained_history {
+                log_state(
+                    "transcript_note: pane retains no host scrollback (alt-screen pane?); extracted viewport content only",
+                );
+                if copy_toast {
+                    show_notification(
+                        client,
+                        "herdr-extractor: pane keeps no host scrollback; viewport only",
+                    );
+                }
+            }
+            Ok(ModeLoad {
+                text,
+                wrap_width: None,
+                no_retained_history,
+            })
+        }
+    }
+}
+
+fn show_notification(client: &mut SocketClient, title: &str) {
+    match client.show_notification(title) {
+        Ok(result) if !result.shown => {
+            log_state(&format!("notification_not_shown reason={}", result.reason));
+        }
+        Ok(_) => {}
+        Err(error) => log_state(&format!("notification_error: {error:#}")),
+    }
+}
+
 fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
+            KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::ToggleMode),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
             _ => None,
@@ -278,9 +358,30 @@ mod tests {
             Some(ExtractInput::Down)
         );
         assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Some(ExtractInput::ToggleMode)
+        );
+        assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
             Some(ExtractInput::Char('x'))
         );
+    }
+
+    #[test]
+    fn transcript_entrypoint_opens_in_global_mode() {
+        let initial_mode = |entrypoint: Option<&str>| {
+            if is_transcript_entrypoint(entrypoint) {
+                ExtractMode::Global
+            } else {
+                ExtractMode::Scrollback
+            }
+        };
+        assert_eq!(
+            initial_mode(Some("extract-transcript")),
+            ExtractMode::Global
+        );
+        assert_eq!(initial_mode(Some("extract")), ExtractMode::Scrollback);
+        assert_eq!(initial_mode(None), ExtractMode::Scrollback);
     }
 
     #[test]

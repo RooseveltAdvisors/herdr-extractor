@@ -83,6 +83,7 @@ fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
     };
     let text = status_text(
         usize::from(status_area.width),
+        app.mode(),
         app.query(),
         app.filtered_count(),
         app.total_count(),
@@ -97,16 +98,19 @@ fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
 /// Build a status line that fits within `width`.
 pub fn status_text(
     width: usize,
+    mode: crate::extract_app::ExtractMode,
     query: &str,
     filtered: usize,
     total: usize,
     message: &str,
 ) -> String {
     let q = if query.is_empty() { "-" } else { query };
+    let mode = mode.name();
     let variants = [
-        format!(" extract  query:{q}  {filtered}/{total}  {message}  enter:copy  esc:cancel "),
-        format!(" extract  query:{q}  {filtered}/{total}  {message}"),
-        format!(" extract q:{q} {filtered}/{total}"),
+        format!(" extract  mode:{mode}  query:{q}  {filtered}/{total}  {message}  enter:copy  ctrl-g:mode  esc:cancel "),
+        format!(" extract  mode:{mode}  query:{q}  {filtered}/{total}  {message}"),
+        format!(" extract mode:{mode} q:{q} {filtered}/{total}"),
+        format!(" extract mode:{mode}"),
         " extract".to_string(),
     ];
     let text = variants
@@ -135,27 +139,37 @@ fn truncate(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extract_app::ExtractMode;
     use pretty_assertions::assert_eq;
 
     #[test]
     fn status_text_keeps_help_when_width_allows() {
-        let text = status_text(100, "path", 3, 12, "");
+        let text = status_text(140, ExtractMode::Scrollback, "path", 3, 12, "");
         assert!(text.contains("enter:copy"));
         assert!(text.contains("esc:cancel"));
+        assert!(text.contains("ctrl-g:mode"));
         assert!(text.contains("extract"));
-        assert!(text.chars().count() <= 100);
+        assert!(text.chars().count() <= 140);
+    }
+
+    #[test]
+    fn status_text_shows_the_active_mode() {
+        let scrollback = status_text(100, ExtractMode::Scrollback, "-", 4, 9, "");
+        assert!(scrollback.contains("mode:scrollback"));
+        let global = status_text(100, ExtractMode::Global, "-", 4, 9, "");
+        assert!(global.contains("mode:global"));
     }
 
     #[test]
     fn status_text_fits_narrow_width() {
-        let text = status_text(10, "abc", 1, 2, "");
+        let text = status_text(10, ExtractMode::Global, "abc", 1, 2, "");
         assert!(text.chars().count() <= 10);
         assert!(text.contains("extract") || text.contains("ext"));
     }
 
     #[test]
     fn status_text_shows_counts() {
-        let text = status_text(80, "-", 4, 9, "");
+        let text = status_text(80, ExtractMode::Scrollback, "-", 4, 9, "");
         assert!(text.contains("4/9"));
     }
 

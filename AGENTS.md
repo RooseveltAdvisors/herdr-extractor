@@ -9,13 +9,17 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
   pane `extract`) and `extract_transcript` (full retained transcript, pane `extract-transcript`).
 - `scripts/open-extractor`: action launcher taking the entrypoint id as `$1`; stale-`HERDR_BIN_PATH` fallback.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
-- `src/extract_app.rs`: pure typeahead/selection state machine.
-- `src/extract_ui.rs`: ratatui renderer.
+- `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
+  (scrollback/global) toggle state; `Ctrl+G` inside the picker requests a mode switch through
+  `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
+- `src/extract_ui.rs`: ratatui renderer (status line shows the active mode).
 - `src/herdr_client.rs`: bounded Unix-socket calls for scrollback/transcript text, pane layout and
   scroll state, and notifications.
 - `src/clipboard.rs`: OSC 52 copy.
 - The pane entrypoint (`HERDR_PLUGIN_ENTRYPOINT_ID`: `extract` vs `extract-transcript`) selects the
-  read mode in `src/main.rs`; the transcript read never falls back to viewport-shaped sources.
+  initial read mode in `src/main.rs`; the transcript/global read never falls back to
+  viewport-shaped sources. The in-picker `Ctrl+G` toggle is the primary path between modes; the
+  `extract_transcript` action only exists to land directly in global mode.
 
 Keep pure extraction and state behavior covered by unit tests. Preserve the public lineage credit to
 `laktak/extrakto` in README, LICENSE notes, and manifest metadata.
