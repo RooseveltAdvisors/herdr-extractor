@@ -36,15 +36,29 @@ fn run() -> Result<()> {
         is_transcript_entrypoint(std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID").ok().as_deref());
     let mut client = SocketClient::connect(Path::new(&socket_path))?;
     let (pane_text, no_retained_history) = if transcript_mode {
-        let text = client.read_transcript_pane(&pane_id)?;
-        let empty_history = match client.pane_scroll(&pane_id) {
-            Ok(scroll) => !scroll.has_retained_history(),
-            Err(error) => {
-                log_state(&format!("pane_scroll_unavailable: {error:#}"));
-                false
+        match client.read_session_history_pane(&pane_id) {
+            Ok(Some(history)) => (history, false),
+            fallback => {
+                if let Err(error) = &fallback {
+                    log_state(&format!("session_history_error: {error:#}"));
+                }
+                let text = client.read_transcript_pane(&pane_id)?;
+                if text.truncated {
+                    log_state(&format!(
+                        "transcript_note: server capped the transcript read at 1000 lines; covered {} lines; full-session coverage needs experimental.pane_history = true in the herdr config",
+                        text.text.lines().count()
+                    ));
+                }
+                let empty_history = match client.pane_scroll(&pane_id) {
+                    Ok(scroll) => !scroll.has_retained_history(),
+                    Err(error) => {
+                        log_state(&format!("pane_scroll_unavailable: {error:#}"));
+                        false
+                    }
+                };
+                (text, empty_history)
             }
-        };
-        (text, empty_history)
+        }
     } else {
         (client.read_scrollback_pane(&pane_id)?, false)
     };
@@ -90,6 +104,18 @@ fn run() -> Result<()> {
                 Ok(_) => {}
                 Err(error) => log_state(&format!("notification_error: {error:#}")),
             }
+        }
+    }
+
+    if transcript_mode && pane_text.truncated && settings.copy_toast {
+        match client.show_notification(
+            "herdr-extractor: transcript limited to the last 1000 lines; set experimental.pane_history = true in herdr config for full-session coverage",
+        ) {
+            Ok(result) if !result.shown => {
+                log_state(&format!("notification_not_shown reason={}", result.reason));
+            }
+            Ok(_) => {}
+            Err(error) => log_state(&format!("notification_error: {error:#}")),
         }
     }
 

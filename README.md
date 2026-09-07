@@ -37,8 +37,14 @@ Two actions share one picker UI and differ only in what they read:
 `RooseveltAdvisors.herdr-extractor.extract_transcript` opens the `extract-transcript` overlay
 entrypoint and reads the whole retained session transcript, not just the current viewport.
 
-- The real transcript source is `pane.read` with `source = "recent_unwrapped"` and the maximum line
-  bound the server accepts (Herdr caps the bound itself, currently 1000 logical lines).
+- The transcript source covers the whole retained session. When Herdr saves pane history
+  (`experimental.pane_history = true` in the herdr config, default off), the extractor reads the
+  pane's full saved transcript from `session-history.json` in the session data directory - every
+  retained line, including content older than the API cap. Otherwise it reads `pane.read` with
+  `source = "recent_unwrapped"`; the server caps that at 1000 logical lines, so a transcript log
+  records a `transcript_note` naming the covered line count and, if toasts are enabled, raises a
+  notification saying `experimental.pane_history = true` unlocks full-session coverage. Retention
+  itself is bounded by `advanced.scrollback_limit_bytes`.
 - The transcript read never degrades to viewport-shaped sources. On a Herdr without
   `recent_unwrapped` it fails instead of silently pretending the viewport is the session.
 - Herdr alt-screen panes do not keep host scrollback. When `pane.get` reports no retained history
