@@ -13,4 +13,6 @@ pub enum Outcome {
     Continue,
     Copy(String),
     Cancel,
+    /// Toggle the requested data mode; the driver re-extracts and applies it.
+    SwitchMode(crate::extract_app::ExtractMode),
 }

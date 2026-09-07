@@ -12,8 +12,34 @@ const CTRL_C: char = '\u{3}';
 const BACKSPACE_BS: char = '\u{8}';
 const BACKSPACE_DEL: char = '\u{7f}';
 const ENTER: char = '\n';
+const CTRL_G: char = '\u{7}'; // Ctrl+G toggles the data mode
 const UP: char = '\u{11}'; // DC1 — internal sentinel for Up
 const DOWN: char = '\u{12}'; // DC2 — internal sentinel for Down
+
+/// Which data source the item list was extracted from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractMode {
+    /// The focused pane's retained scrollback.
+    Scrollback,
+    /// The pane's full saved session history (transcript-grade coverage).
+    Global,
+}
+
+impl ExtractMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Scrollback => Self::Global,
+            Self::Global => Self::Scrollback,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Scrollback => "scrollback",
+            Self::Global => "global",
+        }
+    }
+}
 
 /// Inputs the extract TUI maps onto the pure state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +51,7 @@ pub enum ExtractInput {
     Down,
     Esc,
     CtrlC,
+    ToggleMode,
 }
 
 impl ExtractInput {
@@ -35,6 +62,7 @@ impl ExtractInput {
             CTRL_C => Self::CtrlC,
             BACKSPACE_BS | BACKSPACE_DEL => Self::Backspace,
             ENTER | '\r' => Self::Enter,
+            CTRL_G => Self::ToggleMode,
             UP => Self::Up,
             DOWN => Self::Down,
             other => Self::Char(other),
@@ -63,6 +91,7 @@ pub struct ExtractApp {
     /// Index into `filtered`.
     selected: usize,
     message: Option<String>,
+    mode: ExtractMode,
     theme: Theme,
 }
 
@@ -74,10 +103,18 @@ impl ExtractApp {
             query: String::new(),
             selected: 0,
             message: None,
+            mode: ExtractMode::Scrollback,
             theme,
         };
         app.refilter();
         app
+    }
+
+    /// Builder: start in a specific data mode (for example the transcript
+    /// entrypoint opens straight into global mode).
+    pub fn in_mode(mut self, mode: ExtractMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub fn from_visible_text(text: &str, theme: Theme) -> Self {
@@ -112,6 +149,7 @@ impl ExtractApp {
                 self.move_sel(1);
                 Outcome::Continue
             }
+            ExtractInput::ToggleMode => Outcome::SwitchMode(self.mode.toggle()),
             ExtractInput::Char(ch) => {
                 if ch.is_control() {
                     return Outcome::Continue;
@@ -193,6 +231,33 @@ impl ExtractApp {
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    pub fn mode(&self) -> ExtractMode {
+        self.mode
+    }
+
+    /// Apply a mode switch: swap the item list, keep the current filter query
+    /// and restore the selection by item text when it still matches.
+    pub fn apply_mode(&mut self, mode: ExtractMode, items: Vec<ExtractItem>) {
+        let selected_text = self.selected_item().map(|item| item.text.clone());
+        self.mode = mode;
+        self.items = items;
+        self.refilter();
+        if let Some(text) = selected_text {
+            if let Some(position) = self
+                .filtered
+                .iter()
+                .position(|&index| self.items[index].text == text)
+            {
+                self.selected = position;
+            }
+        }
+    }
+
+    /// Show a transient status message (for example while re-reading a mode).
+    pub fn set_message(&mut self, message: Option<String>) {
+        self.message = message;
     }
 
     pub fn selected_index(&self) -> usize {
@@ -386,5 +451,91 @@ single: 'single-quoted-token'\n";
 
         let empty = ExtractApp::new(Vec::new(), Theme::default());
         assert_eq!(empty.message(), Some("no matches"));
+    }
+
+    #[test]
+    fn ctrl_g_toggles_mode_and_reports_the_target() {
+        let mut a = app(&["alpha-token"]);
+        assert_eq!(a.mode(), ExtractMode::Scrollback);
+        assert_eq!(
+            a.handle_char('\u{7}'),
+            Outcome::SwitchMode(ExtractMode::Global)
+        );
+        assert_eq!(
+            a.handle_input(ExtractInput::ToggleMode),
+            Outcome::SwitchMode(ExtractMode::Global)
+        );
+        // The app does not flip its mode until the driver applies the switch,
+        // so repeated toggles keep reporting the same target.
+        assert_eq!(a.mode(), ExtractMode::Scrollback);
+
+        // After the driver applies the switch, toggling targets the other mode.
+        a.apply_mode(ExtractMode::Global, items(&["global-token"]));
+        assert_eq!(a.mode(), ExtractMode::Global);
+        assert_eq!(
+            a.handle_input(ExtractInput::ToggleMode),
+            Outcome::SwitchMode(ExtractMode::Scrollback)
+        );
+    }
+
+    #[test]
+    fn apply_mode_keeps_query_and_refilters() {
+        let mut a = app(&["scrollback-only-token", "shared-alpha"]);
+        a.handle_char('a');
+        assert_eq!(a.filtered_count(), 2);
+
+        a.apply_mode(
+            ExtractMode::Global,
+            items(&["global-only-gamma", "shared-alpha"]),
+        );
+
+        assert_eq!(a.mode(), ExtractMode::Global);
+        assert_eq!(a.query(), "a");
+        assert_eq!(a.total_count(), 2);
+        assert_eq!(a.filtered_count(), 2);
+        let texts: Vec<_> = a.visible_rows().iter().map(|(_, text)| *text).collect();
+        assert_eq!(texts, ["global-only-gamma", "shared-alpha"]);
+    }
+
+    #[test]
+    fn apply_mode_restores_selection_by_item_text() {
+        let mut a = app(&["alpha-token", "beta-selected", "gamma-token"]);
+        a.handle_input(ExtractInput::Down);
+        assert_eq!(a.selected_item().unwrap().text, "beta-selected");
+
+        a.apply_mode(
+            ExtractMode::Global,
+            items(&["gamma-token", "beta-selected"]),
+        );
+
+        assert_eq!(a.selected_item().unwrap().text, "beta-selected");
+
+        // A selection that disappears falls back to the first match.
+        a.apply_mode(ExtractMode::Scrollback, items(&["delta-token"]));
+        assert_eq!(a.selected_index(), 0);
+        assert_eq!(a.selected_item().unwrap().text, "delta-token");
+    }
+
+    #[test]
+    fn mode_names_and_toggle_round_trip() {
+        assert_eq!(ExtractMode::Scrollback.name(), "scrollback");
+        assert_eq!(ExtractMode::Global.name(), "global");
+        assert_eq!(ExtractMode::Scrollback.toggle(), ExtractMode::Global);
+        assert_eq!(ExtractMode::Global.toggle(), ExtractMode::Scrollback);
+    }
+
+    #[test]
+    fn in_mode_builder_sets_the_initial_mode() {
+        let a = ExtractApp::new(items(&["alpha"]), Theme::default()).in_mode(ExtractMode::Global);
+        assert_eq!(a.mode(), ExtractMode::Global);
+    }
+
+    #[test]
+    fn set_message_shows_until_the_next_refilter() {
+        let mut a = app(&["alpha-token"]);
+        a.set_message(Some("reading global history...".to_string()));
+        assert_eq!(a.message(), Some("reading global history..."));
+        a.handle_char('a');
+        assert_eq!(a.message(), None);
     }
 }
