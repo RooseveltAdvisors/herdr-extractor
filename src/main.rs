@@ -260,7 +260,6 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
-            KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::ToggleMode),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
             _ => None,
@@ -272,6 +271,7 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
         KeyCode::Enter => Some(ExtractInput::Enter),
         KeyCode::Up => Some(ExtractInput::Up),
         KeyCode::Down => Some(ExtractInput::Down),
+        KeyCode::Tab => Some(ExtractInput::SwitchMode),
         KeyCode::Char(character) => Some(ExtractInput::Char(character)),
         _ => None,
     }
@@ -379,8 +379,12 @@ mod tests {
             Some(ExtractInput::Down)
         );
         assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(ExtractInput::SwitchMode)
+        );
+        assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-            Some(ExtractInput::ToggleMode)
+            None
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),

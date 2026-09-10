@@ -9,6 +9,11 @@ use ratatui::Frame;
 use crate::extract_app::ExtractApp;
 use crate::herdr_client::PaneGeometry;
 
+/// Pane rows consumed below the last client-visible row by Herdr's floating
+/// overlay chrome. Measured against a live 0.9.0 rendered capture; keep this
+/// tunable if Herdr changes the border/padding height.
+pub const RESERVED_BOTTOM_ROWS: u16 = 3;
+
 pub fn draw(frame: &mut Frame<'_>, app: &ExtractApp) {
     draw_with_visible_geometry(frame, app, None);
 }
@@ -25,13 +30,16 @@ pub fn draw_with_visible_geometry(
     if area.height == 0 || area.width == 0 {
         return;
     }
+    // Herdr's overlay box is client-width even when pane.layout reports a
+    // narrower pane rectangle. Keep the PR-8 geometry clamp for list content,
+    // but use the visible frame width for captain-facing header and prompt.
+    let header_area = frame.area();
+    draw_header(frame, app, header_area);
+    draw_prompt(frame, app, header_area);
     let body_area = drawable_body_area(area);
     let lines = render_body(app, usize::from(body_area.height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
-    if let Some(status_area) = drawable_status_area(area) {
-        draw_status(frame, app, status_area);
-    }
-    if let Some(reserved_area) = reserved_bottom_row(area) {
+    if let Some(reserved_area) = reserved_bottom_rows(area) {
         frame.render_widget(Clear, reserved_area);
     }
 }
@@ -50,8 +58,16 @@ pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
 
 fn drawable_body_area(area: Rect) -> Rect {
     Rect {
-        height: area.height.saturating_sub(2),
-        ..area
+        x: area.x,
+        y: if area.height >= 2 {
+            area.y.saturating_add(2)
+        } else {
+            area.y
+        },
+        width: area.width,
+        height: area
+            .height
+            .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2)),
     }
 }
 
@@ -59,30 +75,69 @@ fn drawable_status_area(area: Rect) -> Option<Rect> {
     if area.height == 0 {
         return None;
     }
-    let status_offset = area.height.saturating_sub(2);
     Some(Rect {
-        y: area.y.saturating_add(status_offset),
+        y: area.y,
         height: 1,
         ..area
     })
 }
 
-fn reserved_bottom_row(area: Rect) -> Option<Rect> {
-    if area.height < 2 {
+fn reserved_bottom_rows(area: Rect) -> Option<Rect> {
+    if area.height <= RESERVED_BOTTOM_ROWS {
         return None;
     }
     Some(Rect {
-        y: area.y + area.height - 1,
-        height: 1,
+        y: area.y + area.height - RESERVED_BOTTOM_ROWS,
+        height: RESERVED_BOTTOM_ROWS,
         ..area
     })
+}
+
+fn draw_header(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
+    if let Some(header_area) = drawable_status_area(area) {
+        frame.render_widget(
+            Paragraph::new(status_text(
+                usize::from(header_area.width),
+                app.mode(),
+                app.query(),
+                app.filtered_count(),
+                app.total_count(),
+                app.message().unwrap_or(""),
+            ))
+            .style(app.theme().status_style()),
+            header_area,
+        );
+    }
+}
+
+fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
+    if area.height < 2 {
+        return;
+    }
+    let prompt_area = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
+    let mut spans = vec![Span::styled("> ", app.theme().status_style())];
+    spans.push(Span::styled(
+        app.query(),
+        app.theme().match_style(true).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(item) = app.selected_item() {
+        spans.push(Span::styled(
+            format!("  {}", item.text),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), prompt_area);
 }
 
 fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'static>> {
     if max_rows == 0 {
         return Vec::new();
     }
-    let rows = app.visible_rows();
+    let rows = app.visible_matches();
     if rows.is_empty() {
         let msg = app.message().unwrap_or("no matches");
         return vec![Line::from(Span::styled(
@@ -104,15 +159,46 @@ fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'sta
 
     rows[start..end]
         .iter()
-        .map(|(is_selected, text)| {
-            let prefix = if *is_selected { "> " } else { "  " };
-            let line = format!("{prefix}{text}");
-            Line::from(Span::styled(
-                truncate(&line, width),
-                row_style(app.theme(), *is_selected),
-            ))
+        .map(|(is_selected, text, positions)| {
+            render_row(app.theme(), *is_selected, text, positions, width)
         })
         .collect()
+}
+
+fn render_row(
+    theme: &crate::theme::Theme,
+    selected: bool,
+    text: &str,
+    positions: &[usize],
+    width: usize,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+    let prefix = if selected { "> " } else { "  " };
+    let available = width.saturating_sub(prefix.chars().count());
+    let text_chars: Vec<char> = text.chars().collect();
+    let truncated = text_chars.len() > available;
+    let content_len = if truncated && available > 0 {
+        available.saturating_sub(1)
+    } else {
+        available
+    };
+    let base_style = row_style(theme, selected);
+    let match_style = base_style.add_modifier(Modifier::UNDERLINED);
+    let mut spans = vec![Span::styled(prefix, base_style)];
+    for (index, character) in text_chars.iter().take(content_len).enumerate() {
+        let style = if positions.contains(&index) {
+            match_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(character.to_string(), style));
+    }
+    if truncated && available > 0 {
+        spans.push(Span::styled("…", base_style));
+    }
+    Line::from(spans)
 }
 
 fn row_style(theme: &crate::theme::Theme, is_selected: bool) -> Style {
@@ -124,22 +210,7 @@ fn row_style(theme: &crate::theme::Theme, is_selected: bool) -> Style {
     }
 }
 
-fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, status_area: Rect) {
-    let text = status_text(
-        usize::from(status_area.width),
-        app.mode(),
-        app.query(),
-        app.filtered_count(),
-        app.total_count(),
-        app.message().unwrap_or(""),
-    );
-    frame.render_widget(
-        Paragraph::new(text).style(app.theme().status_style()),
-        status_area,
-    );
-}
-
-/// Build a status line that fits within `width`.
+/// Build the top header with the active mode, counts, and inline key hints.
 pub fn status_text(
     width: usize,
     mode: crate::extract_app::ExtractMode,
@@ -148,19 +219,21 @@ pub fn status_text(
     total: usize,
     message: &str,
 ) -> String {
-    let q = if query.is_empty() { "-" } else { query };
-    let mode = mode.name();
+    let _ = (query, message);
+    let mode = mode.name().to_ascii_uppercase();
     let variants = [
-        format!(" extract  mode:{mode}  query:{q}  {filtered}/{total}  {message}  enter:copy  ctrl-g:mode  esc:cancel "),
-        format!(" extract  mode:{mode}  query:{q}  {filtered}/{total}  {message}"),
-        format!(" extract mode:{mode} q:{q} {filtered}/{total}"),
-        format!(" extract mode:{mode}"),
-        " extract".to_string(),
+        format!(" {mode}  {filtered}/{total}  ·  tab mode  ·  enter copy  ·  esc cancel "),
+        format!(" {mode}  {filtered}/{total}  · tab mode · enter copy · esc cancel "),
+        format!(" {mode} {filtered}/{total} · tab mode · enter copy "),
+        format!(" {mode} {filtered}/{total} · tab mode"),
+        format!(" {mode} {filtered}/{total}"),
+        format!(" {mode}"),
+        " EXTRACT".to_string(),
     ];
     let text = variants
         .into_iter()
         .find(|candidate| candidate.chars().count() <= width)
-        .unwrap_or_else(|| " extract ".to_string());
+        .unwrap_or_else(|| " EXTRACT ".to_string());
     text.chars().take(width).collect()
 }
 
@@ -189,26 +262,26 @@ mod tests {
     #[test]
     fn status_text_keeps_help_when_width_allows() {
         let text = status_text(140, ExtractMode::Scrollback, "path", 3, 12, "");
-        assert!(text.contains("enter:copy"));
-        assert!(text.contains("esc:cancel"));
-        assert!(text.contains("ctrl-g:mode"));
-        assert!(text.contains("extract"));
+        assert!(text.contains("enter copy"));
+        assert!(text.contains("esc cancel"));
+        assert!(text.contains("tab mode"));
+        assert!(text.contains("SCROLLBACK"));
         assert!(text.chars().count() <= 140);
     }
 
     #[test]
     fn status_text_shows_the_active_mode() {
         let scrollback = status_text(100, ExtractMode::Scrollback, "-", 4, 9, "");
-        assert!(scrollback.contains("mode:scrollback"));
+        assert!(scrollback.contains("SCROLLBACK"));
         let global = status_text(100, ExtractMode::Global, "-", 4, 9, "");
-        assert!(global.contains("mode:global"));
+        assert!(global.contains("GLOBAL"));
     }
 
     #[test]
     fn status_text_fits_narrow_width() {
         let text = status_text(10, ExtractMode::Global, "abc", 1, 2, "");
         assert!(text.chars().count() <= 10);
-        assert!(text.contains("extract") || text.contains("ext"));
+        assert!(text.contains("GLOBAL") || text.contains("EXTRACT"));
     }
 
     #[test]
@@ -275,20 +348,20 @@ mod tests {
     }
 
     #[test]
-    fn drawable_layout_reserves_bottom_row_below_status() {
+    fn drawable_layout_puts_header_at_top_and_reserves_measured_chrome_rows() {
         let area = Rect::new(2, 3, 30, 12);
 
-        assert_eq!(drawable_body_area(area), Rect::new(2, 3, 30, 10));
-        assert_eq!(drawable_status_area(area), Some(Rect::new(2, 13, 30, 1)));
-        assert_eq!(reserved_bottom_row(area), Some(Rect::new(2, 14, 30, 1)));
+        assert_eq!(drawable_body_area(area), Rect::new(2, 5, 30, 7));
+        assert_eq!(drawable_status_area(area), Some(Rect::new(2, 3, 30, 1)));
+        assert_eq!(reserved_bottom_rows(area), Some(Rect::new(2, 12, 30, 3)));
     }
 
     #[test]
-    fn drawable_layout_keeps_status_visible_in_a_one_row_area() {
+    fn drawable_layout_keeps_header_visible_in_a_short_area() {
         let area = Rect::new(0, 4, 20, 1);
 
         assert_eq!(drawable_body_area(area), Rect::new(0, 4, 20, 0));
         assert_eq!(drawable_status_area(area), Some(Rect::new(0, 4, 20, 1)));
-        assert_eq!(reserved_bottom_row(area), None);
+        assert_eq!(reserved_bottom_rows(area), None);
     }
 }

@@ -12,7 +12,7 @@ const CTRL_C: char = '\u{3}';
 const BACKSPACE_BS: char = '\u{8}';
 const BACKSPACE_DEL: char = '\u{7f}';
 const ENTER: char = '\n';
-const CTRL_G: char = '\u{7}'; // Ctrl+G toggles the data mode
+const TAB: char = '\t';
 const UP: char = '\u{11}'; // DC1 — internal sentinel for Up
 const DOWN: char = '\u{12}'; // DC2 — internal sentinel for Down
 
@@ -51,7 +51,7 @@ pub enum ExtractInput {
     Down,
     Esc,
     CtrlC,
-    ToggleMode,
+    SwitchMode,
 }
 
 impl ExtractInput {
@@ -62,7 +62,7 @@ impl ExtractInput {
             CTRL_C => Self::CtrlC,
             BACKSPACE_BS | BACKSPACE_DEL => Self::Backspace,
             ENTER | '\r' => Self::Enter,
-            CTRL_G => Self::ToggleMode,
+            TAB => Self::SwitchMode,
             UP => Self::Up,
             DOWN => Self::Down,
             other => Self::Char(other),
@@ -85,8 +85,8 @@ impl ExtractInput {
 /// Typeahead-filtered item list.
 pub struct ExtractApp {
     items: Vec<ExtractItem>,
-    /// Indices into `items` matching the current query (screen order).
-    filtered: Vec<usize>,
+    /// Fuzzy matches for the current query in screen order.
+    filtered: Vec<FuzzyMatch>,
     query: String,
     /// Index into `filtered`.
     selected: usize,
@@ -149,7 +149,7 @@ impl ExtractApp {
                 self.move_sel(1);
                 Outcome::Continue
             }
-            ExtractInput::ToggleMode => Outcome::SwitchMode(self.mode.toggle()),
+            ExtractInput::SwitchMode => Outcome::SwitchMode(self.mode.toggle()),
             ExtractInput::Char(ch) => {
                 if ch.is_control() {
                     return Outcome::Continue;
@@ -185,21 +185,8 @@ impl ExtractApp {
     }
 
     fn refilter(&mut self) {
-        let selected_item = self.filtered.get(self.selected).copied();
-        let q = self.query.to_ascii_lowercase();
-        self.filtered = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| {
-                if q.is_empty() {
-                    true
-                } else {
-                    item.text.to_ascii_lowercase().contains(&q)
-                }
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let selected_item = self.filtered.get(self.selected).map(|item| item.index);
+        self.filtered = fuzzy_matches(&self.items, &self.query);
         if self.filtered.is_empty() {
             self.selected = 0;
             self.message = Some("no matches".to_string());
@@ -209,7 +196,7 @@ impl ExtractApp {
                 .and_then(|item| {
                     self.filtered
                         .iter()
-                        .position(|&candidate| candidate == item)
+                        .position(|candidate| candidate.index == item)
                 })
                 .unwrap_or(0);
         }
@@ -218,7 +205,7 @@ impl ExtractApp {
     pub fn selected_item(&self) -> Option<&ExtractItem> {
         self.filtered
             .get(self.selected)
-            .and_then(|&i| self.items.get(i))
+            .and_then(|item| self.items.get(item.index))
     }
 
     pub fn query(&self) -> &str {
@@ -248,7 +235,7 @@ impl ExtractApp {
             if let Some(position) = self
                 .filtered
                 .iter()
-                .position(|&index| self.items[index].text == text)
+                .position(|item| self.items[item.index].text == text)
             {
                 self.selected = position;
             }
@@ -277,13 +264,136 @@ impl ExtractApp {
         self.filtered
             .iter()
             .enumerate()
-            .filter_map(|(pos, &idx)| {
+            .filter_map(|(pos, item_match)| {
                 self.items
-                    .get(idx)
+                    .get(item_match.index)
                     .map(|item| (pos == self.selected, item.text.as_str()))
             })
             .collect()
     }
+
+    /// Filtered items in display order with the character positions to highlight.
+    pub fn visible_matches(&self) -> Vec<(bool, &str, &[usize])> {
+        self.filtered
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, item_match)| {
+                self.items.get(item_match.index).map(|item| {
+                    (
+                        pos == self.selected,
+                        item.text.as_str(),
+                        item_match.positions.as_slice(),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FuzzyMatch {
+    index: usize,
+    score: i32,
+    positions: Vec<usize>,
+}
+
+/// Match a query as a case-aware subsequence, favoring word starts and runs.
+/// Lowercase queries are case-insensitive; an uppercase query is smart-case.
+fn fuzzy_matches(items: &[ExtractItem], query: &str) -> Vec<FuzzyMatch> {
+    let mut matches: Vec<_> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            fuzzy_match(&item.text, query).map(|(score, positions)| FuzzyMatch {
+                index,
+                score,
+                positions,
+            })
+        })
+        .collect();
+    matches.sort_by_key(|item| std::cmp::Reverse(item.score));
+    matches
+}
+
+fn fuzzy_match(text: &str, query: &str) -> Option<(i32, Vec<usize>)> {
+    let query_chars: Vec<char> = query.chars().collect();
+    let text_chars: Vec<char> = text.chars().collect();
+    if query_chars.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    if text_chars.is_empty() || query_chars.len() > text_chars.len() {
+        return None;
+    }
+
+    let smart_case = query_chars.iter().any(|character| character.is_uppercase());
+    let mut scores = vec![vec![None; text_chars.len()]; query_chars.len()];
+    let mut previous = vec![vec![None; text_chars.len()]; query_chars.len()];
+
+    for (query_index, query_char) in query_chars.iter().enumerate() {
+        for (text_index, text_char) in text_chars.iter().enumerate() {
+            if !chars_match(*query_char, *text_char, smart_case) {
+                continue;
+            }
+            let base = 10
+                + if is_word_start(&text_chars, text_index) {
+                    15
+                } else {
+                    0
+                };
+            if query_index == 0 {
+                scores[query_index][text_index] = Some(base);
+                continue;
+            }
+            let mut best: Option<(i32, usize)> = None;
+            for (previous_index, previous_score) in
+                scores[query_index - 1].iter().enumerate().take(text_index)
+            {
+                let Some(previous_score) = *previous_score else {
+                    continue;
+                };
+                let run_bonus = if text_index == previous_index + 1 {
+                    20
+                } else {
+                    0
+                };
+                let candidate = previous_score + base + run_bonus;
+                if best.is_none_or(|(score, _)| candidate > score) {
+                    best = Some((candidate, previous_index));
+                }
+            }
+            if let Some((score, previous_index)) = best {
+                scores[query_index][text_index] = Some(score);
+                previous[query_index][text_index] = Some(previous_index);
+            }
+        }
+    }
+
+    let (score, mut text_index) = scores[query_chars.len() - 1]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, score)| score.map(|score| (score, index)))
+        .max_by_key(|(score, index)| (*score, std::cmp::Reverse(*index)))?;
+    let mut positions = vec![text_index];
+    for query_index in (1..query_chars.len()).rev() {
+        text_index = previous[query_index][text_index]?;
+        positions.push(text_index);
+    }
+    positions.reverse();
+    Some((score, positions))
+}
+
+fn chars_match(query: char, text: char, smart_case: bool) -> bool {
+    if smart_case {
+        query == text
+    } else {
+        query.eq_ignore_ascii_case(&text)
+    }
+}
+
+fn is_word_start(text: &[char], index: usize) -> bool {
+    index == 0
+        || (!text[index - 1].is_alphanumeric() && text[index].is_alphanumeric())
+        || (text[index].is_uppercase() && text[index - 1].is_lowercase())
 }
 
 #[cfg(test)]
@@ -454,15 +564,11 @@ single: 'single-quoted-token'\n";
     }
 
     #[test]
-    fn ctrl_g_toggles_mode_and_reports_the_target() {
+    fn switch_mode_toggles_mode_and_reports_the_target() {
         let mut a = app(&["alpha-token"]);
         assert_eq!(a.mode(), ExtractMode::Scrollback);
         assert_eq!(
-            a.handle_char('\u{7}'),
-            Outcome::SwitchMode(ExtractMode::Global)
-        );
-        assert_eq!(
-            a.handle_input(ExtractInput::ToggleMode),
+            a.handle_char('\t'),
             Outcome::SwitchMode(ExtractMode::Global)
         );
         // The app does not flip its mode until the driver applies the switch,
@@ -473,8 +579,31 @@ single: 'single-quoted-token'\n";
         a.apply_mode(ExtractMode::Global, items(&["global-token"]));
         assert_eq!(a.mode(), ExtractMode::Global);
         assert_eq!(
-            a.handle_input(ExtractInput::ToggleMode),
+            a.handle_input(ExtractInput::SwitchMode),
             Outcome::SwitchMode(ExtractMode::Scrollback)
+        );
+    }
+
+    #[test]
+    fn fuzzy_matching_is_subsequence_smart_case_and_highlights_positions() {
+        let insensitive = fuzzy_match("Herdr Extractor", "hex").unwrap();
+        assert_eq!(insensitive.1, vec![0, 6, 7]);
+
+        let smart_case = fuzzy_match("Herdr Extractor", "HX");
+        assert!(
+            smart_case.is_none(),
+            "uppercase query should be case-sensitive"
+        );
+
+        let matches = fuzzy_matches(&items(&["latest", "long-token"]), "lt");
+        assert!(matches.iter().any(|item| item.index == 1));
+        assert_eq!(
+            matches
+                .iter()
+                .find(|item| item.index == 1)
+                .unwrap()
+                .positions,
+            vec![0, 5]
         );
     }
 
@@ -494,7 +623,9 @@ single: 'single-quoted-token'\n";
         assert_eq!(a.total_count(), 2);
         assert_eq!(a.filtered_count(), 2);
         let texts: Vec<_> = a.visible_rows().iter().map(|(_, text)| *text).collect();
-        assert_eq!(texts, ["global-only-gamma", "shared-alpha"]);
+        assert_eq!(texts.len(), 2);
+        assert!(texts.contains(&"global-only-gamma"));
+        assert!(texts.contains(&"shared-alpha"));
     }
 
     #[test]
