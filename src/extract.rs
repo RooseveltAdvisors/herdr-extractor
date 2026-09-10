@@ -543,9 +543,7 @@ fn shell_noise_line(text: &str, offset: usize) -> bool {
         .find('\n')
         .map_or(text.len(), |position| offset + position);
     let line = &text[start..end];
-    line.contains("HERDR_SOCKET_PATH")
-        || line.contains("HERDR_PLUGIN_")
-        || line.trim_start().starts_with("printf ")
+    line.contains("HERDR_SOCKET_PATH") || line.contains("HERDR_PLUGIN_") || line.contains("printf ")
 }
 
 #[cfg(test)]
