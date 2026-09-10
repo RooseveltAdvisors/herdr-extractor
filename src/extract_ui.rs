@@ -7,9 +7,21 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::extract_app::ExtractApp;
+use crate::herdr_client::PaneGeometry;
 
 pub fn draw(frame: &mut Frame<'_>, app: &ExtractApp) {
-    let area = frame.area();
+    draw_with_visible_geometry(frame, app, None);
+}
+
+/// Draw within the pane rectangle Herdr reports, when it is narrower or
+/// shorter than the picker PTY. A fixed upstream layout naturally passes the
+/// full frame through unchanged.
+pub fn draw_with_visible_geometry(
+    frame: &mut Frame<'_>,
+    app: &ExtractApp,
+    geometry: Option<PaneGeometry>,
+) {
+    let area = drawable_area(frame.area(), geometry);
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -23,6 +35,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &ExtractApp) {
     let lines = render_body(app, usize::from(body_height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
     draw_status(frame, app, area);
+}
+
+pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
+    let Some(geometry) = geometry else {
+        return frame;
+    };
+    Rect {
+        x: frame.x,
+        y: frame.y,
+        width: frame.width.min(geometry.width),
+        height: frame.height.min(geometry.height),
+    }
 }
 
 fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'static>> {
@@ -202,5 +226,31 @@ mod tests {
         assert_eq!(unselected.bg, Some(Color::DarkGray));
         assert!(unselected.add_modifier.contains(Modifier::DIM));
         assert!(!unselected.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn drawable_area_clamps_each_axis_to_server_geometry() {
+        let frame = Rect::new(2, 3, 80, 24);
+        assert_eq!(
+            drawable_area(
+                frame,
+                Some(crate::herdr_client::PaneGeometry {
+                    width: 30,
+                    height: 12
+                })
+            ),
+            Rect::new(2, 3, 30, 12)
+        );
+    }
+
+    #[test]
+    fn drawable_area_keeps_existing_frame_when_server_area_is_larger_or_unknown() {
+        let frame = Rect::new(0, 0, 80, 24);
+        let geometry = Some(crate::herdr_client::PaneGeometry {
+            width: 100,
+            height: 40,
+        });
+        assert_eq!(drawable_area(frame, geometry), frame);
+        assert_eq!(drawable_area(frame, None), frame);
     }
 }

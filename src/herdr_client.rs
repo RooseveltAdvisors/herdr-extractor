@@ -68,6 +68,13 @@ pub struct PaneText {
     pub truncated: bool,
 }
 
+/// The pane rectangle Herdr reports in the current tab layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneGeometry {
+    pub width: u16,
+    pub height: u16,
+}
+
 #[derive(Debug)]
 struct RpcError {
     code: String,
@@ -233,7 +240,7 @@ impl SocketClient {
         })
     }
 
-    pub fn visible_pane_width(&mut self, pane_id: &str) -> Result<usize> {
+    pub fn visible_pane_geometry(&mut self, pane_id: &str) -> Result<PaneGeometry> {
         let result = self.call("pane.layout", json!({ "pane_id": pane_id }))?;
         expect_type(&result, "pane_layout")?;
         let panes = result["layout"]["panes"]
@@ -246,7 +253,13 @@ impl SocketClient {
         let width = pane["rect"]["width"]
             .as_u64()
             .context("pane_layout result did not include the pane width")?;
-        usize::try_from(width).context("pane width did not fit in usize")
+        let height = pane["rect"]["height"]
+            .as_u64()
+            .context("pane_layout result did not include the pane height")?;
+        Ok(PaneGeometry {
+            width: u16::try_from(width).context("pane width did not fit in u16")?,
+            height: u16::try_from(height).context("pane height did not fit in u16")?,
+        })
     }
 
     pub fn show_notification(&mut self, title: &str) -> Result<NotificationResult> {
@@ -375,7 +388,7 @@ mod tests {
             let request: Value = serde_json::from_str(&request_line).unwrap();
             assert_eq!(request["method"], "pane.layout");
             stream
-                .write_all(b"{\"id\":\"2\",\"result\":{\"type\":\"pane_layout\",\"layout\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"rect\":{\"width\":80}}]}}}\n")
+                .write_all(b"{\"id\":\"2\",\"result\":{\"type\":\"pane_layout\",\"layout\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"rect\":{\"width\":80,\"height\":40}}]}}}\n")
                 .unwrap();
         });
 
@@ -384,7 +397,13 @@ mod tests {
         assert_eq!(pane.text, "scrollback");
         assert_eq!(pane.source, PaneReadSource::RecentUnwrapped);
         assert!(!pane.truncated);
-        assert_eq!(client.visible_pane_width("w1:p1").unwrap(), 80);
+        assert_eq!(
+            client.visible_pane_geometry("w1:p1").unwrap(),
+            PaneGeometry {
+                width: 80,
+                height: 40
+            }
+        );
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
     }
