@@ -35,9 +35,11 @@ Toggling re-extracts live and keeps the current filter query and selection where
 active mode is always visible in the top header, and the hint text names the toggle
 (`tab mode`).
 
-The picker uses a compact fzf-style layout: a top header shows the mode badge, match count, and
-`tab mode · enter copy · esc cancel` hints; a prompt line shows the live query and selected item;
-the dense list below highlights matched characters. The header is intentionally top-anchored so
+The picker uses a dense gh-dash-inspired layout: a colored top header shows the mode and active
+engine badge (`SCROLLBACK:REGEX`, `GLOBAL:NLP`), match count, and `tab mode · enter copy · esc
+cancel` hints; each row has a semantic color, compact kind chip, and Nerd-Font glyph (with ASCII
+fallback); a prompt line shows the live query and selected item; the list highlights matched
+characters. The header is intentionally top-anchored so
 all captain-facing status survives Herdr's measured bottom overlay chrome. Three bottom pane rows
 are reserved as decoration, controlled by the documented `RESERVED_BOTTOM_ROWS` constant.
 
@@ -56,7 +58,10 @@ live mode re-extraction directly.
    when a source is unsupported.
 2. Herdr supplies logical lines for `recent_unwrapped`; fallback sources use the pane layout width.
 3. A bounded extrakto-parity set collects URLs, paths, double/single quotes, and words of at least
-   five characters. Lower/recent results come first and duplicates are removed.
+   five characters. It also recognizes commands, hashes, versions, error lines, and backtick/JSON
+   code. ANSI/SGR residue, box fragments, ratios, percentages, punctuation tails, and wrapped
+   slivers are discarded. Canonicalized duplicates collapse to one item, ranked by recency,
+   semantic usefulness, length, and character variety.
 4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
    scrollback and global (full session history) modes. `Enter` copies exactly one item
    through OSC 52. `Esc` or `Ctrl-C` cancels.
@@ -128,13 +133,59 @@ Create `config.toml` under `herdr plugin config-dir RooseveltAdvisors.herdr-extr
 
 ```toml
 copy_toast = true
+icons = false
 
 [style]
 selected_match_bg = "magenta"
 status_bg = "gray"
+url_fg = "cyan"
+path_fg = "green"
+error_fg = "red"
+command_fg = "yellow"
+hash_fg = "magenta"
+version_fg = "blue"
+quote_fg = "dark-gray"
+code_fg = "light-cyan"
+
+[nlp]
+# Optional, off by default. Regex extraction remains the instant fallback.
+enabled = false
+socket_path = "/run/user/1000/herdr-extractor-nlp.sock"
+confidence_threshold = 0.75
 ```
 
-Named colors and `#RRGGBB` are supported.
+Named colors and `#RRGGBB` are supported. The existing style settings remain valid; the semantic
+foreground settings only affect unselected rows. `icons` may also be set through the environment
+with `HERDR_EXTRACTOR_ASCII_ICONS=1`.
+
+### Optional NLP sidecar contract
+
+NLP mode never bundles a model. When `[nlp].enabled = true`, the plugin connects to the configured
+Unix socket for each extraction with a 180ms read/write deadline. If `socket_path` is omitted it
+uses `HERDR_NLP_SOCKET_PATH`, then `nlp.sock` under the plugin config directory. A connection,
+timeout, or protocol error is logged and the normal regex list is used immediately. Tab mode
+switches repeat the same bounded request, and the header reports `NLP` only after a request
+succeeds.
+
+The protocol is one JSON request and one JSON response per connection:
+
+```json
+{"version":1,"text":"cargo test --release"}
+```
+
+```json
+{"version":1,"candidates":[
+  {"text":"cargo test --release","kind":"command","confidence":0.98},
+  {"text":"--release","kind":"command","confidence":0.91}
+]}
+```
+
+`kind` is one of the stable keys `url`, `path`, `quote`, `squote`, `word`, `command`, `hash`,
+`version`, `error`, or `code`. Candidate text must be at least five characters. Candidates below
+the configured confidence threshold are ignored; accepted candidates replace the regex item's
+kind when their canonical text ties. Any local runtime can implement this contract. For example,
+a Python sidecar can read stdin from a Unix socket, call a locally installed model or rules engine,
+and write the response JSON followed by a newline. The model remains outside this static plugin.
 
 ## Development
 

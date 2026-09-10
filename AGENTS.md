@@ -9,6 +9,7 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
   pane `extract`) and `extract_transcript` (full retained transcript, pane `extract-transcript`).
 - `scripts/open-extractor`: action launcher taking the entrypoint id as `$1`; stale-`HERDR_BIN_PATH` fallback.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
+- `src/nlp.rs`: optional bounded Unix-socket sidecar protocol; no model is bundled.
 - `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
   (scrollback/global) toggle state; `Tab` inside the picker requests a mode switch through
   `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
@@ -23,6 +24,10 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
 
 Keep pure extraction and state behavior covered by unit tests. Preserve the public lineage credit to
 `laktak/extrakto` in README, LICENSE notes, and manifest metadata.
+
+The extractor's stable semantic kinds are `url`, `path`, `quote`, `squote`, `word`, `command`,
+`hash`, `version`, `error`, and `code`. Their colors/icons and the optional `[nlp]` sidecar are
+configured in README's Configuration section; regex extraction is the default and fallback.
 
 ## Development
 

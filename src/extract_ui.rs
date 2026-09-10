@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::extract_app::ExtractApp;
+use crate::extract::{ExtractItem, ItemKind};
+use crate::extract_app::{ExtractApp, ExtractionEngine};
 use crate::herdr_client::PaneGeometry;
 
 /// Pane rows consumed below the last client-visible row by Herdr's floating
@@ -95,16 +96,23 @@ fn reserved_bottom_rows(area: Rect) -> Option<Rect> {
 
 fn draw_header(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
     if let Some(header_area) = drawable_status_area(area) {
+        let text = status_text_with_engine(
+            usize::from(header_area.width),
+            app.mode(),
+            app.engine(),
+            app.query(),
+            app.filtered_count(),
+            app.total_count(),
+            app.message().unwrap_or(""),
+        );
+        let badge_width = text.find("  ").unwrap_or(text.len()).min(text.len());
+        let badge = text[..badge_width].to_string();
+        let rest = text[badge_width..].to_string();
         frame.render_widget(
-            Paragraph::new(status_text(
-                usize::from(header_area.width),
-                app.mode(),
-                app.query(),
-                app.filtered_count(),
-                app.total_count(),
-                app.message().unwrap_or(""),
-            ))
-            .style(app.theme().status_style()),
+            Paragraph::new(Line::from(vec![
+                Span::styled(badge, app.theme().kind_style(ItemKind::Command, true)),
+                Span::styled(rest, app.theme().status_style().add_modifier(Modifier::DIM)),
+            ])),
             header_area,
         );
     }
@@ -137,7 +145,7 @@ fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'sta
     if max_rows == 0 {
         return Vec::new();
     }
-    let rows = app.visible_matches();
+    let rows = app.visible_match_items();
     if rows.is_empty() {
         let msg = app.message().unwrap_or("no matches");
         return vec![Line::from(Span::styled(
@@ -159,8 +167,8 @@ fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'sta
 
     rows[start..end]
         .iter()
-        .map(|(is_selected, text, positions)| {
-            render_row(app.theme(), *is_selected, text, positions, width)
+        .map(|(is_selected, item, positions)| {
+            render_row(app.theme(), *is_selected, item, positions, width)
         })
         .collect()
 }
@@ -168,25 +176,31 @@ fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'sta
 fn render_row(
     theme: &crate::theme::Theme,
     selected: bool,
-    text: &str,
+    item: &ExtractItem,
     positions: &[usize],
     width: usize,
 ) -> Line<'static> {
     if width == 0 {
         return Line::default();
     }
-    let prefix = if selected { "> " } else { "  " };
-    let available = width.saturating_sub(prefix.chars().count());
-    let text_chars: Vec<char> = text.chars().collect();
+    let prefix = if selected { "▌ " } else { "  " };
+    let icon = kind_icon(item.kind, theme.use_icons);
+    let chip = format!("{} {} ", icon, item.kind.stable_key().to_ascii_uppercase());
+    let available = width.saturating_sub(prefix.chars().count() + chip.chars().count());
+    let text_chars: Vec<char> = item.text.chars().collect();
     let truncated = text_chars.len() > available;
     let content_len = if truncated && available > 0 {
         available.saturating_sub(1)
     } else {
         available
     };
-    let base_style = row_style(theme, selected);
+    let base_style = row_style(theme, item.kind, selected);
     let match_style = base_style.add_modifier(Modifier::UNDERLINED);
     let mut spans = vec![Span::styled(prefix, base_style)];
+    spans.push(Span::styled(
+        chip,
+        theme.kind_chip_style(item.kind, selected),
+    ));
     for (index, character) in text_chars.iter().take(content_len).enumerate() {
         let style = if positions.contains(&index) {
             match_style
@@ -201,10 +215,10 @@ fn render_row(
     Line::from(spans)
 }
 
-fn row_style(theme: &crate::theme::Theme, is_selected: bool) -> Style {
-    let style = theme.match_style(is_selected);
+fn row_style(theme: &crate::theme::Theme, kind: ItemKind, is_selected: bool) -> Style {
+    let style = theme.kind_style(kind, is_selected);
     if is_selected {
-        style.add_modifier(Modifier::BOLD)
+        style.add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         style.add_modifier(Modifier::DIM)
     }
@@ -219,15 +233,36 @@ pub fn status_text(
     total: usize,
     message: &str,
 ) -> String {
+    status_text_with_engine(
+        width,
+        mode,
+        ExtractionEngine::Regex,
+        query,
+        filtered,
+        total,
+        message,
+    )
+}
+
+pub fn status_text_with_engine(
+    width: usize,
+    mode: crate::extract_app::ExtractMode,
+    engine: ExtractionEngine,
+    query: &str,
+    filtered: usize,
+    total: usize,
+    message: &str,
+) -> String {
     let _ = (query, message);
     let mode = mode.name().to_ascii_uppercase();
+    let engine = engine.name().to_ascii_uppercase();
     let variants = [
-        format!(" {mode}  {filtered}/{total}  ·  tab mode  ·  enter copy  ·  esc cancel "),
-        format!(" {mode}  {filtered}/{total}  · tab mode · enter copy · esc cancel "),
-        format!(" {mode} {filtered}/{total} · tab mode · enter copy "),
-        format!(" {mode} {filtered}/{total} · tab mode"),
-        format!(" {mode} {filtered}/{total}"),
-        format!(" {mode}"),
+        format!(" {mode}:{engine}  {filtered}/{total}  ·  tab mode  ·  enter copy  ·  esc cancel "),
+        format!(" {mode}:{engine}  {filtered}/{total}  · tab mode · enter copy · esc cancel "),
+        format!(" {mode}:{engine} {filtered}/{total} · tab mode · enter copy "),
+        format!(" {mode}:{engine} {filtered}/{total} · tab mode"),
+        format!(" {mode}:{engine} {filtered}/{total}"),
+        format!(" {mode}:{engine}"),
         " EXTRACT".to_string(),
     ];
     let text = variants
@@ -235,6 +270,33 @@ pub fn status_text(
         .find(|candidate| candidate.chars().count() <= width)
         .unwrap_or_else(|| " EXTRACT ".to_string());
     text.chars().take(width).collect()
+}
+
+fn kind_icon(kind: ItemKind, use_icons: bool) -> &'static str {
+    if !use_icons {
+        return match kind {
+            ItemKind::Url => "U",
+            ItemKind::Path => "P",
+            ItemKind::Error => "!",
+            ItemKind::Command => ">",
+            ItemKind::Hash => "#",
+            ItemKind::Version => "V",
+            ItemKind::Quote | ItemKind::SQuote => "\"",
+            ItemKind::Code => "C",
+            ItemKind::Word => "·",
+        };
+    }
+    match kind {
+        ItemKind::Url => "󰖟",
+        ItemKind::Path => "󰉋",
+        ItemKind::Error => "󰅚",
+        ItemKind::Command => "󰆍",
+        ItemKind::Hash => "󰛢",
+        ItemKind::Version => "󰏗",
+        ItemKind::Quote | ItemKind::SQuote => "󰸥",
+        ItemKind::Code => "󰌠",
+        ItemKind::Word => "󰊕",
+    }
 }
 
 fn truncate(s: &str, width: usize) -> String {
@@ -309,12 +371,12 @@ mod tests {
             ..Theme::default()
         };
 
-        let selected = row_style(&theme, true);
+        let selected = row_style(&theme, ItemKind::Word, true);
         assert_eq!(selected.fg, Some(Color::White));
         assert_eq!(selected.bg, Some(Color::Blue));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
 
-        let unselected = row_style(&theme, false);
+        let unselected = row_style(&theme, ItemKind::Word, false);
         assert_eq!(unselected.fg, Some(Color::Cyan));
         assert_eq!(unselected.bg, Some(Color::DarkGray));
         assert!(unselected.add_modifier.contains(Modifier::DIM));
