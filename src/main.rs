@@ -6,7 +6,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use herdr_extractor::clipboard::copy_to_clipboard;
 use herdr_extractor::config::load_extract_settings;
 use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode};
-use herdr_extractor::herdr_client::{context_focused_pane_id, PaneText, SocketClient};
+use herdr_extractor::herdr_client::{
+    context_focused_pane_id, PaneGeometry, PaneText, SocketClient,
+};
 use herdr_extractor::Outcome;
 
 const TRANSCRIPT_ENTRYPOINT: &str = "extract-transcript";
@@ -89,8 +91,11 @@ fn run_tui(
 ) -> Result<Outcome> {
     let _restore = TerminalRestore;
     let mut terminal = ratatui::init();
+    let mut geometry = read_pane_geometry(client, pane_id);
     loop {
-        terminal.draw(|frame| herdr_extractor::extract_ui::draw(frame, app))?;
+        terminal.draw(|frame| {
+            herdr_extractor::extract_ui::draw_with_visible_geometry(frame, app, geometry)
+        })?;
         match event::read()? {
             Event::Key(key) => {
                 if let Some(input) = key_to_input(key) {
@@ -98,7 +103,11 @@ fn run_tui(
                         Outcome::Continue => {}
                         Outcome::SwitchMode(mode) => {
                             app.set_message(Some(format!("reading {} history...", mode.name())));
-                            terminal.draw(|frame| herdr_extractor::extract_ui::draw(frame, app))?;
+                            terminal.draw(|frame| {
+                                herdr_extractor::extract_ui::draw_with_visible_geometry(
+                                    frame, app, geometry,
+                                )
+                            })?;
                             match load_mode(client, pane_id, mode, copy_toast) {
                                 Ok(load) => {
                                     if load.text.truncated {
@@ -132,8 +141,20 @@ fn run_tui(
                     }
                 }
             }
-            Event::Resize(_, _) => {}
+            Event::Resize(_, _) => {
+                geometry = read_pane_geometry(client, pane_id);
+            }
             _ => {}
+        }
+    }
+}
+
+fn read_pane_geometry(client: &mut SocketClient, pane_id: &str) -> Option<PaneGeometry> {
+    match client.visible_pane_geometry(pane_id) {
+        Ok(geometry) => Some(geometry),
+        Err(error) => {
+            log_state(&format!("pane_geometry_unavailable: {error:#}"));
+            None
         }
     }
 }
@@ -163,8 +184,8 @@ fn load_mode(
             let wrap_width = if text.source.is_unwrapped() {
                 None
             } else {
-                match client.visible_pane_width(pane_id) {
-                    Ok(width) => Some(visible_wrap_width(width)),
+                match client.visible_pane_geometry(pane_id) {
+                    Ok(geometry) => Some(visible_wrap_width(usize::from(geometry.width))),
                     Err(error) => {
                         log_state(&format!("pane_width_unavailable: {error:#}"));
                         None

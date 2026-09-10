@@ -42,7 +42,13 @@ plugin into the operator's shared plugin registry.
 
 Herdr facts this repo relies on (verified against 0.7.3-0.8.2 sources and live 0.8.2):
 `pane.read recent_unwrapped` lines are server-capped at 1000; alt-screen panes keep no host
-scrollback and report `scroll.max_offset_from_bottom = 0` via `pane.get`.
+scrollback and report `scroll.max_offset_from_bottom = 0` via `pane.get`. A live 0.9.0 lab
+also proved that an overlay in a three-pane tab can receive a 60x20 PTY while
+`pane.layout` reports a 30x20 pane rectangle (`zoomed: true`); the pane buffer still contains
+the full rendered status row. Issue #3799 tracks this upstream geometry regression. The
+extractor queries that reported rectangle at startup and on terminal resize, clamps drawing to
+its width and height independently, and anchors the status row to the last clamped row; if the
+layout query is unavailable it retains the normal PTY area.
 
 Never commit `target/`, runtime logs, or local editor files.
 

@@ -35,6 +35,10 @@ Toggling re-extracts live and keeps the current filter query and selection where
 active mode is always visible in the status line, and the hint text names the toggle
 (`ctrl-g:mode`).
 
+The picker also protects its rendering from Herdr overlay geometry drift: it uses the live pane
+layout as the drawable boundary, so the status row and token text remain inside a narrower or
+shorter overlay. When Herdr reports the normal full pane size, rendering is unchanged.
+
 ### Scrollback extract (`prefix+space`)
 
 `RooseveltAdvisors.herdr-extractor.extract` opens the `extract` overlay entrypoint.
