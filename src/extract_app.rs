@@ -25,6 +25,21 @@ pub enum ExtractMode {
     Global,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractionEngine {
+    Regex,
+    Nlp,
+}
+
+impl ExtractionEngine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Regex => "regex",
+            Self::Nlp => "nlp",
+        }
+    }
+}
+
 impl ExtractMode {
     pub fn toggle(self) -> Self {
         match self {
@@ -92,6 +107,7 @@ pub struct ExtractApp {
     selected: usize,
     message: Option<String>,
     mode: ExtractMode,
+    engine: ExtractionEngine,
     theme: Theme,
 }
 
@@ -104,6 +120,7 @@ impl ExtractApp {
             selected: 0,
             message: None,
             mode: ExtractMode::Scrollback,
+            engine: ExtractionEngine::Regex,
             theme,
         };
         app.refilter();
@@ -224,6 +241,14 @@ impl ExtractApp {
         self.mode
     }
 
+    pub fn engine(&self) -> ExtractionEngine {
+        self.engine
+    }
+
+    pub fn set_engine(&mut self, engine: ExtractionEngine) {
+        self.engine = engine;
+    }
+
     /// Apply a mode switch: swap the item list, keep the current filter query
     /// and restore the selection by item text when it still matches.
     pub fn apply_mode(&mut self, mode: ExtractMode, items: Vec<ExtractItem>) {
@@ -285,6 +310,18 @@ impl ExtractApp {
                         item_match.positions.as_slice(),
                     )
                 })
+            })
+            .collect()
+    }
+
+    pub fn visible_match_items(&self) -> Vec<(bool, &ExtractItem, &[usize])> {
+        self.filtered
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, item_match)| {
+                self.items
+                    .get(item_match.index)
+                    .map(|item| (pos == self.selected, item, item_match.positions.as_slice()))
             })
             .collect()
     }

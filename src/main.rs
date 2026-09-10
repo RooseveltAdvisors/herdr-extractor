@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use herdr_extractor::clipboard::copy_to_clipboard;
-use herdr_extractor::config::load_extract_settings;
-use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode};
+use herdr_extractor::config::{load_extract_settings, NlpSettings};
+use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode, ExtractionEngine};
 use herdr_extractor::herdr_client::{
     context_focused_pane_id, PaneGeometry, PaneText, SocketClient,
 };
@@ -48,14 +48,9 @@ fn run() -> Result<()> {
     if load.text.truncated {
         log_state("scrollback_truncated=true");
     }
-    let mut app = ExtractApp::new(
-        herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
-            &load.text.text,
-            load.wrap_width,
-        ),
-        settings.theme.clone(),
-    )
-    .in_mode(initial_mode);
+    let (items, engine) = extract_items(&load, &settings.nlp, config_dir.as_deref().map(Path::new));
+    let mut app = ExtractApp::new(items, settings.theme.clone()).in_mode(initial_mode);
+    app.set_engine(engine);
     log_state(&format!(
         "start mode={} source={} items={} wrap_width={:?} no_retained_history={} copy_toast={}",
         initial_mode.name(),
@@ -66,7 +61,14 @@ fn run() -> Result<()> {
         settings.copy_toast
     ));
 
-    let outcome = run_tui(&mut app, &mut client, &pane_id, settings.copy_toast)?;
+    let outcome = run_tui(
+        &mut app,
+        &mut client,
+        &pane_id,
+        settings.copy_toast,
+        &settings.nlp,
+        config_dir.as_deref().map(Path::new),
+    )?;
     log_state(&format!("outcome={outcome:?}"));
     if let Outcome::Copy(text) = outcome {
         copy_to_clipboard(&text)?;
@@ -88,6 +90,8 @@ fn run_tui(
     client: &mut SocketClient,
     pane_id: &str,
     copy_toast: bool,
+    nlp: &NlpSettings,
+    config_dir: Option<&Path>,
 ) -> Result<Outcome> {
     let _restore = TerminalRestore;
     let mut terminal = ratatui::init();
@@ -113,12 +117,9 @@ fn run_tui(
                                     if load.text.truncated {
                                         log_state("scrollback_truncated=true");
                                     }
-                                    let items =
-                                        herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
-                                            &load.text.text,
-                                            load.wrap_width,
-                                        );
+                                    let (items, engine) = extract_items(&load, nlp, config_dir);
                                     app.apply_mode(mode, items);
+                                    app.set_engine(engine);
                                     log_state(&format!(
                                         "mode_switch mode={} source={} items={} wrap_width={:?} no_retained_history={}",
                                         mode.name(),
@@ -147,6 +148,51 @@ fn run_tui(
             _ => {}
         }
     }
+}
+
+fn extract_items(
+    load: &ModeLoad,
+    nlp: &NlpSettings,
+    config_dir: Option<&Path>,
+) -> (Vec<herdr_extractor::extract::ExtractItem>, ExtractionEngine) {
+    let regex_items = herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
+        &load.text.text,
+        load.wrap_width,
+    );
+    if !nlp.enabled {
+        return (regex_items, ExtractionEngine::Regex);
+    }
+    let Some(socket_path) = nlp_socket_path(nlp, config_dir) else {
+        log_state("nlp_fallback: enabled but no sidecar socket configured");
+        return (regex_items, ExtractionEngine::Regex);
+    };
+    match herdr_extractor::nlp::request_candidates(&socket_path, &load.text.text) {
+        Ok(candidates) => {
+            log_state(&format!(
+                "nlp_engine=active candidates={}",
+                candidates.len()
+            ));
+            (
+                herdr_extractor::extract::merge_nlp_candidates(
+                    regex_items,
+                    &candidates,
+                    nlp.confidence_threshold,
+                ),
+                ExtractionEngine::Nlp,
+            )
+        }
+        Err(error) => {
+            log_state(&format!("nlp_fallback: {error:#}"));
+            (regex_items, ExtractionEngine::Regex)
+        }
+    }
+}
+
+fn nlp_socket_path(nlp: &NlpSettings, config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
+    nlp.socket_path
+        .clone()
+        .or_else(|| std::env::var_os("HERDR_NLP_SOCKET_PATH").map(std::path::PathBuf::from))
+        .or_else(|| config_dir.map(|directory| directory.join("nlp.sock")))
 }
 
 fn read_pane_geometry(client: &mut SocketClient, pane_id: &str) -> Option<PaneGeometry> {

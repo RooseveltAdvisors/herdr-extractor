@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+
+use crate::extract::ItemKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
@@ -10,6 +12,15 @@ pub struct Theme {
     pub status_fg: Color,
     pub status_bg: Color,
     pub empty_fg: Color,
+    pub url_fg: Color,
+    pub path_fg: Color,
+    pub error_fg: Color,
+    pub command_fg: Color,
+    pub hash_fg: Color,
+    pub version_fg: Color,
+    pub quote_fg: Color,
+    pub code_fg: Color,
+    pub use_icons: bool,
 }
 
 impl Default for Theme {
@@ -22,6 +33,15 @@ impl Default for Theme {
             status_fg: Color::Black,
             status_bg: Color::Gray,
             empty_fg: Color::Yellow,
+            url_fg: Color::Cyan,
+            path_fg: Color::Green,
+            error_fg: Color::Red,
+            command_fg: Color::Yellow,
+            hash_fg: Color::Magenta,
+            version_fg: Color::Blue,
+            quote_fg: Color::DarkGray,
+            code_fg: Color::LightCyan,
+            use_icons: detect_icons(),
         }
     }
 }
@@ -44,6 +64,43 @@ impl Theme {
     pub fn empty_style(&self) -> Style {
         Style::default().fg(self.empty_fg)
     }
+
+    pub fn kind_style(&self, kind: ItemKind, selected: bool) -> Style {
+        let foreground = match kind {
+            ItemKind::Url => self.url_fg,
+            ItemKind::Path => self.path_fg,
+            ItemKind::Error => self.error_fg,
+            ItemKind::Command => self.command_fg,
+            ItemKind::Hash => self.hash_fg,
+            ItemKind::Version => self.version_fg,
+            ItemKind::Quote | ItemKind::SQuote => self.quote_fg,
+            ItemKind::Code => self.code_fg,
+            ItemKind::Word => self.match_fg,
+        };
+        if selected {
+            self.match_style(true)
+        } else {
+            let mut style = style_with_optional_bg(foreground, self.match_bg);
+            if matches!(kind, ItemKind::Quote | ItemKind::SQuote) {
+                style = style.add_modifier(Modifier::ITALIC | Modifier::DIM);
+            }
+            style
+        }
+    }
+
+    pub fn kind_chip_style(&self, kind: ItemKind, selected: bool) -> Style {
+        self.kind_style(kind, selected)
+    }
+}
+
+fn detect_icons() -> bool {
+    std::env::var("HERDR_EXTRACTOR_ASCII_ICONS")
+        .map(|value| value != "1" && value != "true")
+        .unwrap_or_else(|_| {
+            std::env::var("TERM")
+                .map(|term| term != "dumb")
+                .unwrap_or(true)
+        })
 }
 
 fn style_with_optional_bg(fg: Color, bg: Option<Color>) -> Style {

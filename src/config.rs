@@ -1,16 +1,34 @@
 //! Loads optional extractor settings from `$HERDR_PLUGIN_CONFIG_DIR/config.toml`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::theme::{parse_color, Theme};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ExtractSettings {
     pub copy_toast: bool,
     pub theme: Theme,
+    pub nlp: NlpSettings,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NlpSettings {
+    pub enabled: bool,
+    pub socket_path: Option<PathBuf>,
+    pub confidence_threshold: f32,
+}
+
+impl Default for NlpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket_path: None,
+            confidence_threshold: 0.75,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -18,6 +36,8 @@ struct RawConfig {
     #[serde(default)]
     copy_toast: bool,
     style: Option<StyleConfig>,
+    nlp: Option<NlpConfig>,
+    icons: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +49,22 @@ struct StyleConfig {
     status_fg: Option<String>,
     status_bg: Option<String>,
     empty_fg: Option<String>,
+    url_fg: Option<String>,
+    path_fg: Option<String>,
+    error_fg: Option<String>,
+    command_fg: Option<String>,
+    hash_fg: Option<String>,
+    version_fg: Option<String>,
+    quote_fg: Option<String>,
+    code_fg: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NlpConfig {
+    #[serde(default)]
+    enabled: bool,
+    socket_path: Option<String>,
+    confidence_threshold: Option<f32>,
 }
 
 fn compile_settings(raw: &RawConfig) -> Result<ExtractSettings> {
@@ -57,10 +93,36 @@ fn compile_settings(raw: &RawConfig) -> Result<ExtractSettings> {
         if let Some(value) = &style.empty_fg {
             theme.empty_fg = parse_color(value).context("invalid style.empty_fg")?;
         }
+        for (value, target, name) in [
+            (&style.url_fg, &mut theme.url_fg, "style.url_fg"),
+            (&style.path_fg, &mut theme.path_fg, "style.path_fg"),
+            (&style.error_fg, &mut theme.error_fg, "style.error_fg"),
+            (&style.command_fg, &mut theme.command_fg, "style.command_fg"),
+            (&style.hash_fg, &mut theme.hash_fg, "style.hash_fg"),
+            (&style.version_fg, &mut theme.version_fg, "style.version_fg"),
+            (&style.quote_fg, &mut theme.quote_fg, "style.quote_fg"),
+            (&style.code_fg, &mut theme.code_fg, "style.code_fg"),
+        ] {
+            if let Some(value) = value {
+                *target = parse_color(value).with_context(|| format!("invalid {name}"))?;
+            }
+        }
     }
+    if let Some(icons) = raw.icons {
+        theme.use_icons = icons;
+    }
+    let nlp = raw
+        .nlp
+        .as_ref()
+        .map_or_else(NlpSettings::default, |nlp| NlpSettings {
+            enabled: nlp.enabled,
+            socket_path: nlp.socket_path.clone().map(PathBuf::from),
+            confidence_threshold: nlp.confidence_threshold.unwrap_or(0.75).clamp(0.0, 1.0),
+        });
     Ok(ExtractSettings {
         copy_toast: raw.copy_toast,
         theme,
+        nlp,
     })
 }
 
@@ -120,5 +182,22 @@ status_bg = "blue"
             .unwrap_err()
             .to_string()
             .contains("style.match_fg"));
+    }
+
+    #[test]
+    fn nlp_is_off_by_default_and_parses_socket_settings() {
+        assert!(!ExtractSettings::default().nlp.enabled);
+        let raw = toml::from_str(
+            "icons = false\n[nlp]\nenabled = true\nsocket_path = '/tmp/extract-nlp.sock'\nconfidence_threshold = 0.8\n",
+        )
+        .unwrap();
+        let settings = compile_settings(&raw).unwrap();
+        assert!(settings.nlp.enabled);
+        assert_eq!(
+            settings.nlp.socket_path,
+            Some(PathBuf::from("/tmp/extract-nlp.sock"))
+        );
+        assert_eq!(settings.nlp.confidence_threshold, 0.8);
+        assert!(!settings.theme.use_icons);
     }
 }
