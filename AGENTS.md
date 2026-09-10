@@ -10,15 +10,15 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
 - `scripts/open-extractor`: action launcher taking the entrypoint id as `$1`; stale-`HERDR_BIN_PATH` fallback.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
 - `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
-  (scrollback/global) toggle state; `Ctrl+G` inside the picker requests a mode switch through
+  (scrollback/global) toggle state; `Tab` inside the picker requests a mode switch through
   `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
-- `src/extract_ui.rs`: ratatui renderer (status line shows the active mode).
+- `src/extract_ui.rs`: ratatui renderer (top header, query prompt, fuzzy-match highlighting).
 - `src/herdr_client.rs`: bounded Unix-socket calls for scrollback/transcript text, pane layout and
   scroll state, and notifications.
 - `src/clipboard.rs`: OSC 52 copy.
 - The pane entrypoint (`HERDR_PLUGIN_ENTRYPOINT_ID`: `extract` vs `extract-transcript`) selects the
   initial read mode in `src/main.rs`; the transcript/global read never falls back to
-  viewport-shaped sources. The in-picker `Ctrl+G` toggle is the primary path between modes; the
+  viewport-shaped sources. The in-picker `Tab` toggle is the primary path between modes; the
   `extract_transcript` action only exists to land directly in global mode.
 
 Keep pure extraction and state behavior covered by unit tests. Preserve the public lineage credit to
@@ -47,8 +47,9 @@ also proved that an overlay in a three-pane tab can receive a 60x20 PTY while
 `pane.layout` reports a 30x20 pane rectangle (`zoomed: true`); the pane buffer still contains
 the full rendered status row. Issue #3799 tracks this upstream geometry regression. The
 extractor queries that reported rectangle at startup and on terminal resize, clamps drawing to
-its width and height independently, and anchors the status row to the last clamped row; if the
-layout query is unavailable it retains the normal PTY area.
+its width and height independently, and anchors the top header to survive the clipped bottom
+chrome; `RESERVED_BOTTOM_ROWS` documents the measured three-row decoration reserve. If the layout
+query is unavailable it retains the normal PTY area.
 
 Never commit `target/`, runtime logs, or local editor files.
 

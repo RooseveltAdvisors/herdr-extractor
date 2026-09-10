@@ -15,29 +15,36 @@ One action, one picker, two data modes:
 
 | Action | Default key | Reads |
 | --- | --- | --- |
-| `RooseveltAdvisors.herdr-extractor.extract` | `prefix+space` | Retained pane scrollback; press `Ctrl+G` inside the picker to switch to the full saved session history |
+| `RooseveltAdvisors.herdr-extractor.extract` | `prefix+space` | Retained pane scrollback; press `Tab` inside the picker to switch to the full saved session history |
 | `RooseveltAdvisors.herdr-extractor.extract_transcript` | optional (for example `prefix+shift+space`) | The pane's full retained session transcript, opening the picker straight in global mode |
 
-### In-menu mode toggle (`Ctrl+G`)
+### In-menu mode toggle (`Tab`)
 
-The `prefix+space` extract picker has a mode toggle built in. Press `Ctrl+G` inside the overlay to
+The `prefix+space` extract picker has a mode toggle built in. Press `Tab` inside the overlay to
 switch between the two data modes:
 
-- **scrollback mode** (`mode:scrollback` in the status line): the focused pane's retained
+- **scrollback mode** (`SCROLLBACK` in the header): the focused pane's retained
   scrollback, as always.
-- **global mode** (`mode:global`): the pane's full saved session history, the same transcript-grade
+- **global mode** (`GLOBAL` in the header): the pane's full saved session history, the same transcript-grade
   coverage the `extract_transcript` action provides. When Herdr saves pane history
   (`experimental.pane_history = true`, default off) this reads every retained line from
   `session-history.json`; otherwise it falls back to the server-capped 1000-line
   `recent_unwrapped` transcript and the coverage note explains the limit.
 
 Toggling re-extracts live and keeps the current filter query and selection where possible. The
-active mode is always visible in the status line, and the hint text names the toggle
-(`ctrl-g:mode`).
+active mode is always visible in the top header, and the hint text names the toggle
+(`tab mode`).
 
-The picker also protects its rendering from Herdr overlay geometry drift: it uses the live pane
-layout as the drawable boundary, so the status row and token text remain inside a narrower or
-shorter overlay. When Herdr reports the normal full pane size, rendering is unchanged.
+The picker uses a compact fzf-style layout: a top header shows the mode badge, match count, and
+`tab mode · enter copy · esc cancel` hints; a prompt line shows the live query and selected item;
+the dense list below highlights matched characters. The header is intentionally top-anchored so
+all captain-facing status survives Herdr's measured bottom overlay chrome. Three bottom pane rows
+are reserved as decoration, controlled by the documented `RESERVED_BOTTOM_ROWS` constant.
+
+Matching is implemented in-house with the existing ratatui/crossterm stack: smart-case
+subsequence matching scores contiguous runs and word-boundary starts, and adds no external `fzf`
+binary dependency. Keeping it in the plugin preserves a single static binary and lets Tab trigger
+live mode re-extraction directly.
 
 ### Scrollback extract (`prefix+space`)
 
@@ -50,7 +57,7 @@ shorter overlay. When Herdr reports the normal full pane size, rendering is unch
 2. Herdr supplies logical lines for `recent_unwrapped`; fallback sources use the pane layout width.
 3. A bounded extrakto-parity set collects URLs, paths, double/single quotes, and words of at least
    five characters. Lower/recent results come first and duplicates are removed.
-4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Ctrl+G` toggles between
+4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
    scrollback and global (full session history) modes. `Enter` copies exactly one item
    through OSC 52. `Esc` or `Ctrl-C` cancels.
 
@@ -59,7 +66,7 @@ shorter overlay. When Herdr reports the normal full pane size, rendering is unch
 `RooseveltAdvisors.herdr-extractor.extract_transcript` opens the `extract-transcript` overlay
 entrypoint and reads the whole retained session transcript, not just the current viewport. It
 starts the picker straight in global mode; inside the picker it behaves exactly like the
-`prefix+space` extract with `Ctrl+G` already applied. Keep the binding only if you want a
+`prefix+space` extract with `Tab` already applied. Keep the binding only if you want a
 shortcut that lands directly in global mode - the in-menu toggle covers the same data.
 
 - The transcript source covers the whole retained session. When Herdr saves pane history
@@ -93,7 +100,7 @@ type = "plugin_action"
 command = "RooseveltAdvisors.herdr-extractor.extract"
 description = "extract a scrollback token"
 
-# Optional: land directly in global (full session history) mode. The Ctrl+G
+# Optional: land directly in global (full session history) mode. The Tab
 # toggle inside the extract picker reaches the same data without this binding.
 [[keys.command]]
 key = "prefix+shift+space"
@@ -106,7 +113,7 @@ Copy mode is for READING; `prefix+space` is for TAKING. Scroll through pane outp
 exit to normal mode, then invoke `RooseveltAdvisors.herdr-extractor.extract` with `prefix+space`.
 The picker searches retained scrollback and copies the chosen result through OSC 52, so it reaches
 the outer terminal clipboard (including the captain's Mac). When the token may sit far above the
-current viewport, press `Ctrl+G` inside the picker to switch to global mode and search the pane's
+current viewport, press `Tab` inside the picker to switch to global mode and search the pane's
 full saved session history.
 
 This action moved out of `RooseveltAdvisors.herdr-leap` in the public plugin split. Do not bind
