@@ -290,6 +290,9 @@ fn filter_paths(text: &str) -> Vec<RankedItem> {
     let mut out = Vec::new();
     for caps in re.captures_iter(text) {
         let Some(m) = caps.get(1) else { continue };
+        if shell_noise_line(text, m.start()) {
+            continue;
+        }
         let item = canonicalize(m.as_str());
         if item.chars().count() >= MIN_LENGTH && !junk_token(&item) && plausible_path(&item) {
             out.push(RankedItem {
@@ -341,6 +344,9 @@ fn filter_code(text: &str) -> Vec<RankedItem> {
     re.captures_iter(text)
         .filter_map(|caps| {
             let m = caps.get(0)?;
+            if shell_noise_line(text, m.start()) {
+                return None;
+            }
             let item = if caps.get(1).is_some() {
                 m.as_str().to_string()
             } else {
@@ -388,6 +394,7 @@ fn filter_hashes(text: &str) -> Vec<RankedItem> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(?i)\b[0-9a-f]{7,64}\b").expect("hash regex"));
     re.find_iter(text)
+        .filter(|m| !shell_noise_line(text, m.start()))
         .map(|m| RankedItem {
             item: ExtractItem {
                 text: m.as_str().to_string(),
@@ -405,6 +412,7 @@ fn filter_versions(text: &str) -> Vec<RankedItem> {
             .expect("version regex")
     });
     re.find_iter(text)
+        .filter(|m| !shell_noise_line(text, m.start()))
         .map(|m| RankedItem {
             item: ExtractItem {
                 text: m.as_str().to_string(),
@@ -423,6 +431,9 @@ fn filter_errors(text: &str) -> Vec<RankedItem> {
     });
     re.find_iter(text)
         .filter_map(|m| {
+            if shell_noise_line(text, m.start()) {
+                return None;
+            }
             let item = m.as_str().trim();
             (item.chars().count() >= MIN_LENGTH && item.chars().count() <= 240).then_some(
                 RankedItem {
@@ -451,6 +462,9 @@ fn filter_words(text: &str) -> Vec<RankedItem> {
     ];
     re.find_iter(text)
         .filter_map(|m| {
+            if shell_noise_line(text, m.start()) {
+                return None;
+            }
             let item = m
                 .as_str()
                 .trim_start_matches(lstrip)
@@ -475,6 +489,9 @@ fn collect_joined_groups(
     re.captures_iter(text)
         .filter_map(|caps| {
             let m = caps.get(0)?;
+            if shell_noise_line(text, m.start()) {
+                return None;
+            }
             let mut item = String::new();
             for index in 1..caps.len() {
                 if let Some(group) = caps.get(index) {
@@ -504,6 +521,9 @@ fn collect_joined_groups(
 fn collect_full_match(re: &Regex, text: &str, kind: ItemKind) -> Vec<RankedItem> {
     re.find_iter(text)
         .filter_map(|m| {
+            if shell_noise_line(text, m.start()) {
+                return None;
+            }
             (m.as_str().chars().count() >= MIN_LENGTH).then_some(RankedItem {
                 item: ExtractItem {
                     text: m.as_str().to_string(),
@@ -513,6 +533,19 @@ fn collect_full_match(re: &Regex, text: &str, kind: ItemKind) -> Vec<RankedItem>
             })
         })
         .collect()
+}
+
+fn shell_noise_line(text: &str, offset: usize) -> bool {
+    let start = text[..offset]
+        .rfind('\n')
+        .map_or(0, |position| position + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |position| offset + position);
+    let line = &text[start..end];
+    line.contains("HERDR_SOCKET_PATH")
+        || line.contains("HERDR_PLUGIN_")
+        || line.trim_start().starts_with("printf ")
 }
 
 #[cfg(test)]
