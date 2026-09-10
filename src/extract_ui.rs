@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::extract_app::ExtractApp;
@@ -25,16 +25,15 @@ pub fn draw_with_visible_geometry(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let body_height = area.height.saturating_sub(1);
-    let body_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: body_height,
-    };
-    let lines = render_body(app, usize::from(body_height), usize::from(area.width));
+    let body_area = drawable_body_area(area);
+    let lines = render_body(app, usize::from(body_area.height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
-    draw_status(frame, app, area);
+    if let Some(status_area) = drawable_status_area(area) {
+        draw_status(frame, app, status_area);
+    }
+    if let Some(reserved_area) = reserved_bottom_row(area) {
+        frame.render_widget(Clear, reserved_area);
+    }
 }
 
 pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
@@ -47,6 +46,36 @@ pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
         width: frame.width.min(geometry.width),
         height: frame.height.min(geometry.height),
     }
+}
+
+fn drawable_body_area(area: Rect) -> Rect {
+    Rect {
+        height: area.height.saturating_sub(2),
+        ..area
+    }
+}
+
+fn drawable_status_area(area: Rect) -> Option<Rect> {
+    if area.height == 0 {
+        return None;
+    }
+    let status_offset = area.height.saturating_sub(2);
+    Some(Rect {
+        y: area.y.saturating_add(status_offset),
+        height: 1,
+        ..area
+    })
+}
+
+fn reserved_bottom_row(area: Rect) -> Option<Rect> {
+    if area.height < 2 {
+        return None;
+    }
+    Some(Rect {
+        y: area.y + area.height - 1,
+        height: 1,
+        ..area
+    })
 }
 
 fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'static>> {
@@ -95,16 +124,7 @@ fn row_style(theme: &crate::theme::Theme, is_selected: bool) -> Style {
     }
 }
 
-fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-    let status_area = Rect {
-        x: area.x,
-        y: area.y + area.height - 1,
-        width: area.width,
-        height: 1,
-    };
+fn draw_status(frame: &mut Frame<'_>, app: &ExtractApp, status_area: Rect) {
     let text = status_text(
         usize::from(status_area.width),
         app.mode(),
@@ -252,5 +272,23 @@ mod tests {
         });
         assert_eq!(drawable_area(frame, geometry), frame);
         assert_eq!(drawable_area(frame, None), frame);
+    }
+
+    #[test]
+    fn drawable_layout_reserves_bottom_row_below_status() {
+        let area = Rect::new(2, 3, 30, 12);
+
+        assert_eq!(drawable_body_area(area), Rect::new(2, 3, 30, 10));
+        assert_eq!(drawable_status_area(area), Some(Rect::new(2, 13, 30, 1)));
+        assert_eq!(reserved_bottom_row(area), Some(Rect::new(2, 14, 30, 1)));
+    }
+
+    #[test]
+    fn drawable_layout_keeps_status_visible_in_a_one_row_area() {
+        let area = Rect::new(0, 4, 20, 1);
+
+        assert_eq!(drawable_body_area(area), Rect::new(0, 4, 20, 0));
+        assert_eq!(drawable_status_area(area), Some(Rect::new(0, 4, 20, 1)));
+        assert_eq!(reserved_bottom_row(area), None);
     }
 }
