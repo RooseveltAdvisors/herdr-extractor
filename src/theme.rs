@@ -28,8 +28,8 @@ impl Default for Theme {
         Self {
             match_fg: Color::Gray,
             match_bg: None,
-            selected_match_fg: Color::Cyan,
-            selected_match_bg: Color::DarkGray,
+            selected_match_fg: Color::Rgb(0, 0, 0),
+            selected_match_bg: Color::Rgb(223, 142, 29),
             status_fg: Color::Black,
             status_bg: Color::Gray,
             empty_fg: Color::Gray,
@@ -158,8 +158,8 @@ mod tests {
 
         assert_eq!(theme.match_fg, Color::Gray);
         assert_eq!(theme.match_bg, None);
-        assert_eq!(theme.selected_match_fg, Color::Cyan);
-        assert_eq!(theme.selected_match_bg, Color::DarkGray);
+        assert_eq!(theme.selected_match_fg, Color::Rgb(0, 0, 0));
+        assert_eq!(theme.selected_match_bg, Color::Rgb(223, 142, 29));
         assert_eq!(theme.path_fg, Color::Cyan);
         assert_eq!(theme.url_fg, Color::Gray);
         assert_eq!(theme.hash_fg, Color::Gray);
