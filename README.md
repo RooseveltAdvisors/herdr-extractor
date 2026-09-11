@@ -3,6 +3,39 @@
 A [Herdr](https://herdr.dev) plugin that lists copy-eligible tokens from the focused pane's
 retained **scrollback** and filters them with typeahead.
 
+## Demo
+
+Every copy-eligible token in the focused pane, one keystroke away. Type to narrow, `Enter` to copy.
+
+![The extract picker opening over a deploy session, narrowing 110 tokens to one URL with the query "stgdep", and copying it](docs/demo/extract-demo.gif)
+
+Recorded against the release binary reading synthetic scrollback. The closing `copied → …` line is
+the plugin's own state log, not a caption.
+
+**1 · The scrollback the picker reads.** An ordinary working pane: deploy output, a failing health
+probe, config paths, an artifact hash, quoted failure reasons.
+
+![A terminal pane showing a deploy session: git log, cargo test, a deploy script, a 503 health probe failure, kubectl output, and a revert](docs/demo/01-scrollback.png)
+
+**2 · `prefix+space` — every token, typed and ranked.** 110 candidates pulled out of that pane, each
+tagged with its semantic kind (`URL`, `PATH`, `HASH`, `COMMAND`, `QUOTE`, `WORD`) and its own color
+and glyph. The selected row is marked by a full-width highlight that survives any terminal theme.
+
+![The extract picker listing 110 tokens with colored kind chips and Nerd Font glyphs, the top row highlighted](docs/demo/02-picker.png)
+
+**3 · Fuzzy typeahead, in-house.** `stg` is a subsequence, not a substring — it reaches
+`/srv/releases/staging/…` and `https://staging.example.internal/…` alike. Matched characters are
+underlined in place, and the wrapped detail line above the list always shows the complete selection.
+
+![The same picker filtered to 11 of 110 tokens by the query "stg", with the matched characters underlined in each row](docs/demo/03-fuzzy.png)
+
+**4 · `Tab` switches to the whole session.** Scrollback mode reads the pane's retained scrollback;
+global mode reads the pane's full saved session history — here 190 tokens instead of 110, including
+lines that scrolled past Herdr's 1000-line `pane.read` cap. The badge in the header always names the
+active mode, and the filter query survives the toggle.
+
+![The picker in GLOBAL mode showing 190 of 190 tokens drawn from the full saved session history](docs/demo/04-global.png)
+
 ## Lineage and credit
 
 This workflow follows [laktak/extrakto](https://github.com/laktak/extrakto), “quickly select,
