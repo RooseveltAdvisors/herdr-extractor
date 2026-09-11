@@ -26,21 +26,21 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            match_fg: Color::Yellow,
+            match_fg: Color::Gray,
             match_bg: None,
-            selected_match_fg: Color::White,
-            selected_match_bg: Color::Magenta,
+            selected_match_fg: Color::Cyan,
+            selected_match_bg: Color::DarkGray,
             status_fg: Color::Black,
             status_bg: Color::Gray,
-            empty_fg: Color::Yellow,
-            url_fg: Color::Cyan,
-            path_fg: Color::Green,
-            error_fg: Color::Red,
-            command_fg: Color::Yellow,
-            hash_fg: Color::Magenta,
-            version_fg: Color::Blue,
+            empty_fg: Color::Gray,
+            url_fg: Color::Gray,
+            path_fg: Color::Cyan,
+            error_fg: Color::Gray,
+            command_fg: Color::Gray,
+            hash_fg: Color::Gray,
+            version_fg: Color::Gray,
             quote_fg: Color::DarkGray,
-            code_fg: Color::LightCyan,
+            code_fg: Color::Gray,
             use_icons: detect_icons(),
         }
     }
@@ -153,13 +153,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_theme_uses_less_harsh_match_colors() {
+    fn default_theme_uses_a_restrained_professional_palette() {
         let theme = Theme::default();
 
-        assert_eq!(theme.match_fg, Color::Yellow);
+        assert_eq!(theme.match_fg, Color::Gray);
         assert_eq!(theme.match_bg, None);
-        assert_eq!(theme.selected_match_bg, Color::Magenta);
-        assert_eq!(theme.empty_fg, Color::Yellow);
+        assert_eq!(theme.selected_match_fg, Color::Cyan);
+        assert_eq!(theme.selected_match_bg, Color::DarkGray);
+        assert_eq!(theme.path_fg, Color::Cyan);
+        assert_eq!(theme.url_fg, Color::Gray);
+        assert_eq!(theme.hash_fg, Color::Gray);
+        assert_eq!(theme.version_fg, Color::Gray);
+        assert_ne!(theme.selected_match_fg, Color::White);
+        assert_ne!(theme.selected_match_bg, Color::Magenta);
     }
 
     #[test]
