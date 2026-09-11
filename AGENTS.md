@@ -56,6 +56,12 @@ its height only (the full PTY width is always used), and anchors the top header 
 clipped bottom chrome; `RESERVED_BOTTOM_ROWS` documents the measured three-row decoration reserve. If the layout
 query is unavailable it retains the normal PTY area.
 
+README's Demo section embeds the marketing assets in `docs/demo/` (one GIF, four screenshots).
+Regenerate them by driving the release binary against a stand-in Herdr API socket -- a throwaway
+tmux session plus `HERDR_SOCKET_PATH` and a synthetic `HERDR_PLUGIN_CONTEXT_JSON`, recorded with
+`asciinema` and rendered with `agg` -- never by starting Herdr. Keep the fixtures synthetic and
+keep the captions describing what the binary actually printed.
+
 Never commit `target/`, runtime logs, or local editor files.
 
 ## Maintaining this file
