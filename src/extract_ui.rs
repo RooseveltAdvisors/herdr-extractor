@@ -330,7 +330,9 @@ fn render_row(
     let prefix = if selected { "▌ " } else { "  " };
     let icon = kind_icon(item.kind, theme.use_icons);
     let chip = format!("{} {} ", icon, item.kind.stable_key().to_ascii_uppercase());
-    let available = width.saturating_sub(prefix.chars().count() + chip.chars().count());
+    let prefix_width = prefix.chars().count();
+    let chip_width = chip.chars().count();
+    let available = width.saturating_sub(prefix_width + chip_width);
     let text_chars: Vec<char> = item.text.chars().collect();
     let truncated = text_chars.len() > available;
     let content_len = if truncated && available > 0 {
@@ -356,13 +358,23 @@ fn render_row(
     if truncated && available > 0 {
         spans.push(Span::styled("…", base_style));
     }
+    if selected {
+        let rendered_width = prefix.chars().count()
+            + chip_width
+            + content_len
+            + usize::from(truncated && available > 0);
+        let padding = width.saturating_sub(rendered_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), base_style));
+        }
+    }
     Line::from(spans)
 }
 
 fn row_style(theme: &crate::theme::Theme, kind: ItemKind, is_selected: bool) -> Style {
     let style = theme.kind_style(kind, is_selected);
     if is_selected {
-        style.add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        style.add_modifier(Modifier::BOLD)
     } else {
         style.add_modifier(Modifier::DIM)
     }
@@ -572,15 +584,16 @@ mod tests {
         let theme = Theme {
             match_fg: Color::Gray,
             match_bg: Some(Color::Black),
-            selected_match_fg: Color::Cyan,
-            selected_match_bg: Color::DarkGray,
+            selected_match_fg: Color::Rgb(0, 0, 0),
+            selected_match_bg: Color::Rgb(223, 142, 29),
             ..Theme::default()
         };
 
         let selected = row_style(&theme, ItemKind::Word, true);
-        assert_eq!(selected.fg, Some(Color::Cyan));
-        assert_eq!(selected.bg, Some(Color::DarkGray));
+        assert_eq!(selected.fg, Some(Color::Rgb(0, 0, 0)));
+        assert_eq!(selected.bg, Some(Color::Rgb(223, 142, 29)));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
+        assert!(!selected.add_modifier.contains(Modifier::REVERSED));
 
         let unselected = row_style(&theme, ItemKind::Word, false);
         assert_eq!(unselected.fg, Some(Color::Gray));

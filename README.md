@@ -136,8 +136,8 @@ copy_toast = true
 icons = false
 
 [style]
-selected_match_fg = "cyan"
-selected_match_bg = "dark-gray"
+selected_match_fg = "#000000"
+selected_match_bg = "#df8e1d"
 status_bg = "gray"
 url_fg = "gray"
 path_fg = "cyan"
