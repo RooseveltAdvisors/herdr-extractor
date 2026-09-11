@@ -20,9 +20,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &ExtractApp) {
     draw_with_visible_geometry(frame, app, None);
 }
 
-/// Draw within the pane rectangle Herdr reports, when it is narrower or
-/// shorter than the picker PTY. A fixed upstream layout naturally passes the
-/// full frame through unchanged.
+/// Draw across the picker PTY. Herdr's reported pane rectangle may be narrower
+/// than the overlay it paints, so it can only constrain height.
 pub fn draw_with_visible_geometry(
     frame: &mut Frame<'_>,
     app: &ExtractApp,
@@ -32,12 +31,8 @@ pub fn draw_with_visible_geometry(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    // Herdr's overlay box is client-width even when pane.layout reports a
-    // narrower pane rectangle. Keep the PR-8 geometry clamp for list content,
-    // but use the visible frame width for captain-facing header and prompt.
-    let header_area = frame.area();
-    draw_header(frame, app, header_area);
-    draw_prompt(frame, app, header_area);
+    draw_header(frame, app, area);
+    draw_prompt(frame, app, area);
     let detail_lines = selected_detail_lines(app, usize::from(area.width));
     let detail_height = detail_lines
         .len()
@@ -65,7 +60,7 @@ pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
     Rect {
         x: frame.x,
         y: frame.y,
-        width: frame.width.min(geometry.width),
+        width: frame.width,
         height: frame.height.min(geometry.height),
     }
 }
@@ -575,27 +570,86 @@ mod tests {
         use ratatui::style::Color;
 
         let theme = Theme {
-            match_fg: Color::Cyan,
-            match_bg: Some(Color::DarkGray),
-            selected_match_fg: Color::White,
-            selected_match_bg: Color::Blue,
+            match_fg: Color::Gray,
+            match_bg: Some(Color::Black),
+            selected_match_fg: Color::Cyan,
+            selected_match_bg: Color::DarkGray,
             ..Theme::default()
         };
 
         let selected = row_style(&theme, ItemKind::Word, true);
-        assert_eq!(selected.fg, Some(Color::White));
-        assert_eq!(selected.bg, Some(Color::Blue));
+        assert_eq!(selected.fg, Some(Color::Cyan));
+        assert_eq!(selected.bg, Some(Color::DarkGray));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
 
         let unselected = row_style(&theme, ItemKind::Word, false);
-        assert_eq!(unselected.fg, Some(Color::Cyan));
-        assert_eq!(unselected.bg, Some(Color::DarkGray));
+        assert_eq!(unselected.fg, Some(Color::Gray));
+        assert_eq!(unselected.bg, Some(Color::Black));
         assert!(unselected.add_modifier.contains(Modifier::DIM));
         assert!(!unselected.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn drawable_area_clamps_each_axis_to_server_geometry() {
+    fn narrow_geometry_renders_the_full_frame_width_without_clipping_the_selection() {
+        let long_path =
+            "/long/lab/path/selected-detail-keeps-rendering-past-the-narrow-pane-rectangle-x"
+                .to_string();
+        let app = ExtractApp::new(
+            vec![
+                ExtractItem {
+                    text: long_path.clone(),
+                    kind: ItemKind::Path,
+                },
+                ExtractItem {
+                    text: "https://example.com/short".to_string(),
+                    kind: ItemKind::Url,
+                },
+            ],
+            crate::theme::Theme {
+                use_icons: false,
+                ..crate::theme::Theme::default()
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_with_visible_geometry(
+                    frame,
+                    &app,
+                    Some(PaneGeometry {
+                        width: 30,
+                        height: 12,
+                    }),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..80u16)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect()
+        };
+
+        // Header, prompt, and body chrome still render at the full PTY width.
+        assert!(row_text(0).contains("SCROLLBACK"));
+        assert!(row_text(1).starts_with("> "));
+
+        // The selected detail is soft-wrapped at the full frame width, so its
+        // content fills columns beyond the 30-column pane rectangle.
+        let first_detail_row = row_text(2);
+        assert!(first_detail_row.trim_end().chars().count() > 30);
+        let detail_prefix = "  P PATH ";
+        let continuation_prefix_len = detail_prefix.len();
+        let second_row = row_text(3).trim_end().to_string();
+        let detail = row_text(2).trim_end().to_string() + &second_row[continuation_prefix_len..];
+        assert_eq!(detail, format!("{detail_prefix}{long_path}"));
+        assert!(!detail.contains('…'));
+    }
+
+    #[test]
+    fn drawable_area_keeps_full_frame_width_with_narrow_server_geometry() {
         let frame = Rect::new(2, 3, 80, 24);
         assert_eq!(
             drawable_area(
@@ -605,7 +659,7 @@ mod tests {
                     height: 12
                 })
             ),
-            Rect::new(2, 3, 30, 12)
+            Rect::new(2, 3, 80, 12)
         );
     }
 

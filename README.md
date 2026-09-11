@@ -136,16 +136,17 @@ copy_toast = true
 icons = false
 
 [style]
-selected_match_bg = "magenta"
+selected_match_fg = "cyan"
+selected_match_bg = "dark-gray"
 status_bg = "gray"
-url_fg = "cyan"
-path_fg = "green"
-error_fg = "red"
-command_fg = "yellow"
-hash_fg = "magenta"
-version_fg = "blue"
+url_fg = "gray"
+path_fg = "cyan"
+error_fg = "gray"
+command_fg = "gray"
+hash_fg = "gray"
+version_fg = "gray"
 quote_fg = "dark-gray"
-code_fg = "light-cyan"
+code_fg = "gray"
 
 [nlp]
 # Optional, off by default. Regex extraction remains the instant fallback.
