@@ -489,6 +489,18 @@ mod tests {
     }
 
     #[test]
+    fn enter_copies_the_complete_long_selected_path() {
+        let path = "/home/jon/.pi/agent-sessions/2026-09-11/session--long-path";
+        let mut a = app(&["short", path]);
+        a.handle_input(ExtractInput::Down);
+
+        assert_eq!(
+            a.handle_input(ExtractInput::Enter),
+            Outcome::Copy(path.into())
+        );
+    }
+
+    #[test]
     fn enter_copies_a_url_rejoined_across_a_soft_wrap() {
         let text = "Link https://wrap.example/split/path/to/\ncontinued.txt";
         let mut a = ExtractApp::from_visible_text_with_wrap_width(text, Some(40), Theme::default());

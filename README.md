@@ -38,8 +38,8 @@ active mode is always visible in the top header, and the hint text names the tog
 The picker uses a dense gh-dash-inspired layout: a colored top header shows the mode and active
 engine badge (`SCROLLBACK:REGEX`, `GLOBAL:NLP`), match count, and `tab mode · enter copy · esc
 cancel` hints; each row has a semantic color, compact kind chip, and Nerd-Font glyph (with ASCII
-fallback); a prompt line shows the live query and selected item; the list highlights matched
-characters. The header is intentionally top-anchored so
+fallback); a prompt line shows the live query and a wrapped detail area shows the complete selected
+item; the list highlights matched characters. The header is intentionally top-anchored so
 all captain-facing status survives Herdr's measured bottom overlay chrome. Three bottom pane rows
 are reserved as decoration, controlled by the documented `RESERVED_BOTTOM_ROWS` constant.
 

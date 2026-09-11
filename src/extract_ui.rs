@@ -5,6 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::extract::{ExtractItem, ItemKind};
 use crate::extract_app::{ExtractApp, ExtractionEngine};
@@ -37,7 +38,19 @@ pub fn draw_with_visible_geometry(
     let header_area = frame.area();
     draw_header(frame, app, header_area);
     draw_prompt(frame, app, header_area);
-    let body_area = drawable_body_area(area);
+    let detail_lines = selected_detail_lines(app, usize::from(area.width));
+    let detail_height = detail_lines
+        .len()
+        .min(usize::from(detail_rows_available(area))) as u16;
+    if detail_height > 0 {
+        let detail_area = Rect {
+            y: area.y.saturating_add(2),
+            height: detail_height,
+            ..area
+        };
+        draw_detail(frame, app, detail_area, &detail_lines);
+    }
+    let body_area = drawable_body_area_with_detail(area, detail_height);
     let lines = render_body(app, usize::from(body_area.height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
     if let Some(reserved_area) = reserved_bottom_rows(area) {
@@ -57,19 +70,27 @@ pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
     }
 }
 
-fn drawable_body_area(area: Rect) -> Rect {
+fn drawable_body_area_with_detail(area: Rect, detail_height: u16) -> Rect {
     Rect {
         x: area.x,
         y: if area.height >= 2 {
             area.y.saturating_add(2)
         } else {
             area.y
-        },
+        }
+        .saturating_add(detail_height),
         width: area.width,
-        height: area
-            .height
-            .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2)),
+        height: area.height.saturating_sub(
+            RESERVED_BOTTOM_ROWS
+                .saturating_add(2)
+                .saturating_add(detail_height),
+        ),
     }
+}
+
+fn detail_rows_available(area: Rect) -> u16 {
+    area.height
+        .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2))
 }
 
 fn drawable_status_area(area: Rect) -> Option<Rect> {
@@ -132,13 +153,141 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         app.query(),
         app.theme().match_style(true).add_modifier(Modifier::BOLD),
     ));
-    if let Some(item) = app.selected_item() {
-        spans.push(Span::styled(
-            format!("  {}", item.text),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-    }
     frame.render_widget(Paragraph::new(Line::from(spans)), prompt_area);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DetailLine {
+    prefix: String,
+    text: String,
+}
+
+/// Compose the selected item into display lines without dropping any of its
+/// text. The first line carries the kind chip; continuation lines are aligned
+/// with the item's text. The caller decides how many of the resulting lines
+/// fit in the available pane height.
+fn selected_detail_lines(app: &ExtractApp, width: usize) -> Vec<DetailLine> {
+    let Some(item) = app.selected_item() else {
+        return Vec::new();
+    };
+    compose_detail_lines(item, width, app.theme().use_icons)
+}
+
+fn compose_detail_lines(item: &ExtractItem, width: usize, use_icons: bool) -> Vec<DetailLine> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let prefix = format!(
+        "  {} {} ",
+        kind_icon(item.kind, use_icons),
+        item.kind.stable_key().to_ascii_uppercase()
+    );
+    // A prefix that leaves no room for even one character would itself make
+    // the selected value appear clipped. On very narrow panes, drop the
+    // decoration and give the complete value all available columns.
+    let (first_prefix, continuation_prefix) = if prefix.width() < width {
+        (prefix.clone(), " ".repeat(prefix.width()))
+    } else {
+        (String::new(), String::new())
+    };
+    let first_width = width.saturating_sub(first_prefix.width());
+    let continuation_width = width.saturating_sub(continuation_prefix.width());
+    let chunks = wrap_detail_text(&item.text, first_width, continuation_width);
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| DetailLine {
+            prefix: if index == 0 {
+                first_prefix.clone()
+            } else {
+                continuation_prefix.clone()
+            },
+            text,
+        })
+        .collect()
+}
+
+fn wrap_detail_text(text: &str, first_width: usize, continuation_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut first_line = true;
+
+    for logical_line in text.split('\n') {
+        if logical_line.is_empty() {
+            lines.push(String::new());
+            first_line = false;
+            continue;
+        }
+
+        let mut remaining = logical_line;
+        while !remaining.is_empty() {
+            let width = if first_line {
+                first_width
+            } else {
+                continuation_width
+            };
+            let (chunk, consumed) = take_width(remaining, width);
+            if consumed == 0 {
+                // This only occurs when a caller supplies no usable width.
+                // Keep the value intact rather than silently dropping it.
+                lines.push(remaining.to_string());
+                remaining = "";
+            } else {
+                lines.push(chunk);
+                remaining = &remaining[consumed..];
+            }
+            first_line = false;
+        }
+    }
+
+    // split('\n') yields one empty logical line for an empty string and for a
+    // trailing newline, so this also preserves an explicitly empty selection.
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn take_width(text: &str, max_width: usize) -> (String, usize) {
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+    let mut used_width = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if end > 0 && used_width + character_width > max_width {
+            break;
+        }
+        used_width += character_width;
+        end = index + character.len_utf8();
+        if used_width >= max_width {
+            break;
+        }
+    }
+    (text[..end].to_string(), end)
+}
+
+fn draw_detail(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect, lines: &[DetailLine]) {
+    let Some(item) = app.selected_item() else {
+        return;
+    };
+    let text_style = app
+        .theme()
+        .kind_style(item.kind, true)
+        .add_modifier(Modifier::BOLD);
+    let prefix_style = app.theme().status_style().add_modifier(Modifier::DIM);
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            Line::from(vec![
+                Span::styled(line.prefix.clone(), prefix_style),
+                Span::styled(line.text.clone(), text_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rendered), area);
 }
 
 fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'static>> {
@@ -359,6 +508,68 @@ mod tests {
     }
 
     #[test]
+    fn selected_detail_wrap_preserves_the_complete_string() {
+        let item = ExtractItem {
+            text: "/home/jon/.pi/agent-sessions/2026-09-11/session--long-path".to_string(),
+            kind: ItemKind::Path,
+        };
+        let lines = compose_detail_lines(&item, 24, false);
+        let reconstructed: String = lines.iter().map(|line| line.text.as_str()).collect();
+
+        assert_eq!(reconstructed, item.text);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| !line.text.contains('…')));
+    }
+
+    #[test]
+    fn selected_detail_drops_decoration_when_the_pane_is_too_narrow() {
+        let item = ExtractItem {
+            text: "abcdef".to_string(),
+            kind: ItemKind::Word,
+        };
+        let lines = compose_detail_lines(&item, 3, false);
+
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<String>(),
+            item.text
+        );
+        assert!(lines.iter().all(|line| line.prefix.is_empty()));
+    }
+
+    #[test]
+    fn selected_detail_tracks_navigation_and_typeahead_selection() {
+        let first = "/tmp/first-long-path";
+        let second = "/tmp/second-long-path";
+        let mut app = ExtractApp::new(
+            [first, second]
+                .into_iter()
+                .map(|text| ExtractItem {
+                    text: text.to_string(),
+                    kind: ItemKind::Path,
+                })
+                .collect(),
+            crate::theme::Theme::default(),
+        );
+
+        let displayed = |app: &ExtractApp| {
+            selected_detail_lines(app, 80)
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(displayed(&app), first);
+
+        app.handle_input(crate::extract_app::ExtractInput::Down);
+        assert_eq!(displayed(&app), second);
+
+        app.handle_input(crate::extract_app::ExtractInput::Char('f'));
+        assert_eq!(displayed(&app), first);
+    }
+
+    #[test]
     fn row_style_applies_match_colors_for_selected_and_unselected() {
         use crate::theme::Theme;
         use ratatui::style::Color;
@@ -413,7 +624,14 @@ mod tests {
     fn drawable_layout_puts_header_at_top_and_reserves_measured_chrome_rows() {
         let area = Rect::new(2, 3, 30, 12);
 
-        assert_eq!(drawable_body_area(area), Rect::new(2, 5, 30, 7));
+        assert_eq!(
+            drawable_body_area_with_detail(area, 0),
+            Rect::new(2, 5, 30, 7)
+        );
+        assert_eq!(
+            drawable_body_area_with_detail(area, 3),
+            Rect::new(2, 8, 30, 4)
+        );
         assert_eq!(drawable_status_area(area), Some(Rect::new(2, 3, 30, 1)));
         assert_eq!(reserved_bottom_rows(area), Some(Rect::new(2, 12, 30, 3)));
     }
@@ -422,7 +640,10 @@ mod tests {
     fn drawable_layout_keeps_header_visible_in_a_short_area() {
         let area = Rect::new(0, 4, 20, 1);
 
-        assert_eq!(drawable_body_area(area), Rect::new(0, 4, 20, 0));
+        assert_eq!(
+            drawable_body_area_with_detail(area, 0),
+            Rect::new(0, 4, 20, 0)
+        );
         assert_eq!(drawable_status_area(area), Some(Rect::new(0, 4, 20, 1)));
         assert_eq!(reserved_bottom_rows(area), None);
     }
