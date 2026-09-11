@@ -590,6 +590,65 @@ mod tests {
     }
 
     #[test]
+    fn narrow_geometry_renders_the_full_frame_width_without_clipping_the_selection() {
+        let long_path =
+            "/long/lab/path/selected-detail-keeps-rendering-past-the-narrow-pane-rectangle-x"
+                .to_string();
+        let app = ExtractApp::new(
+            vec![
+                ExtractItem {
+                    text: long_path.clone(),
+                    kind: ItemKind::Path,
+                },
+                ExtractItem {
+                    text: "https://example.com/short".to_string(),
+                    kind: ItemKind::Url,
+                },
+            ],
+            crate::theme::Theme {
+                use_icons: false,
+                ..crate::theme::Theme::default()
+            },
+        );
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_with_visible_geometry(
+                    frame,
+                    &app,
+                    Some(PaneGeometry {
+                        width: 30,
+                        height: 12,
+                    }),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..80u16)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect()
+        };
+
+        // Header, prompt, and body chrome still render at the full PTY width.
+        assert!(row_text(0).contains("SCROLLBACK"));
+        assert!(row_text(1).starts_with("> "));
+
+        // The selected detail is soft-wrapped at the full frame width, so its
+        // content fills columns beyond the 30-column pane rectangle.
+        let first_detail_row = row_text(2);
+        assert!(first_detail_row.trim_end().chars().count() > 30);
+        let detail_prefix = "  P PATH ";
+        let continuation_prefix_len = detail_prefix.len();
+        let second_row = row_text(3).trim_end().to_string();
+        let detail = row_text(2).trim_end().to_string() + &second_row[continuation_prefix_len..];
+        assert_eq!(detail, format!("{detail_prefix}{long_path}"));
+        assert!(!detail.contains('…'));
+    }
+
+    #[test]
     fn drawable_area_keeps_full_frame_width_with_narrow_server_geometry() {
         let frame = Rect::new(2, 3, 80, 24);
         assert_eq!(

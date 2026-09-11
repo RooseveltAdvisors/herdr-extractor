@@ -52,8 +52,8 @@ also proved that an overlay in a three-pane tab can receive a 60x20 PTY while
 `pane.layout` reports a 30x20 pane rectangle (`zoomed: true`); the pane buffer still contains
 the full rendered status row. Issue #3799 tracks this upstream geometry regression. The
 extractor queries that reported rectangle at startup and on terminal resize, clamps drawing to
-its width and height independently, and anchors the top header to survive the clipped bottom
-chrome; `RESERVED_BOTTOM_ROWS` documents the measured three-row decoration reserve. If the layout
+its height only (the full PTY width is always used), and anchors the top header to survive the
+clipped bottom chrome; `RESERVED_BOTTOM_ROWS` documents the measured three-row decoration reserve. If the layout
 query is unavailable it retains the normal PTY area.
 
 Never commit `target/`, runtime logs, or local editor files.
