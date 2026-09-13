@@ -5,10 +5,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::extract::{ExtractItem, ItemKind};
-use crate::extract_app::{ExtractApp, ExtractionEngine};
+use crate::extract_app::{ExtractApp, ExtractionEngine, KindFilter};
 use crate::herdr_client::PaneGeometry;
 
 /// Pane rows consumed below the last client-visible row by Herdr's floating
@@ -33,19 +32,7 @@ pub fn draw_with_visible_geometry(
     }
     draw_header(frame, app, area);
     draw_prompt(frame, app, area);
-    let detail_lines = selected_detail_lines(app, usize::from(area.width));
-    let detail_height = detail_lines
-        .len()
-        .min(usize::from(detail_rows_available(area))) as u16;
-    if detail_height > 0 {
-        let detail_area = Rect {
-            y: area.y.saturating_add(2),
-            height: detail_height,
-            ..area
-        };
-        draw_detail(frame, app, detail_area, &detail_lines);
-    }
-    let body_area = drawable_body_area_with_detail(area, detail_height);
+    let body_area = drawable_body_area(area);
     let lines = render_body(app, usize::from(body_area.height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
     if let Some(reserved_area) = reserved_bottom_rows(area) {
@@ -65,27 +52,19 @@ pub fn drawable_area(frame: Rect, geometry: Option<PaneGeometry>) -> Rect {
     }
 }
 
-fn drawable_body_area_with_detail(area: Rect, detail_height: u16) -> Rect {
+fn drawable_body_area(area: Rect) -> Rect {
     Rect {
         x: area.x,
         y: if area.height >= 2 {
             area.y.saturating_add(2)
         } else {
             area.y
-        }
-        .saturating_add(detail_height),
+        },
         width: area.width,
-        height: area.height.saturating_sub(
-            RESERVED_BOTTOM_ROWS
-                .saturating_add(2)
-                .saturating_add(detail_height),
-        ),
+        height: area
+            .height
+            .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2)),
     }
-}
-
-fn detail_rows_available(area: Rect) -> u16 {
-    area.height
-        .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2))
 }
 
 fn drawable_status_area(area: Rect) -> Option<Rect> {
@@ -116,9 +95,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
             usize::from(header_area.width),
             app.mode(),
             app.engine(),
+            app.kind_filter(),
             app.query(),
             app.filtered_count(),
-            app.total_count(),
+            app.pool_count(),
             app.message().unwrap_or(""),
         );
         let badge_width = text.find("  ").unwrap_or(text.len()).min(text.len());
@@ -149,140 +129,6 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         app.theme().match_style(true).add_modifier(Modifier::BOLD),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), prompt_area);
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DetailLine {
-    prefix: String,
-    text: String,
-}
-
-/// Compose the selected item into display lines without dropping any of its
-/// text. The first line carries the kind chip; continuation lines are aligned
-/// with the item's text. The caller decides how many of the resulting lines
-/// fit in the available pane height.
-fn selected_detail_lines(app: &ExtractApp, width: usize) -> Vec<DetailLine> {
-    let Some(item) = app.selected_item() else {
-        return Vec::new();
-    };
-    compose_detail_lines(item, width, app.theme().use_icons)
-}
-
-fn compose_detail_lines(item: &ExtractItem, width: usize, use_icons: bool) -> Vec<DetailLine> {
-    if width == 0 {
-        return Vec::new();
-    }
-
-    let prefix = format!(
-        "  {} {} ",
-        kind_icon(item.kind, use_icons),
-        item.kind.stable_key().to_ascii_uppercase()
-    );
-    // A prefix that leaves no room for even one character would itself make
-    // the selected value appear clipped. On very narrow panes, drop the
-    // decoration and give the complete value all available columns.
-    let (first_prefix, continuation_prefix) = if prefix.width() < width {
-        (prefix.clone(), " ".repeat(prefix.width()))
-    } else {
-        (String::new(), String::new())
-    };
-    let first_width = width.saturating_sub(first_prefix.width());
-    let continuation_width = width.saturating_sub(continuation_prefix.width());
-    let chunks = wrap_detail_text(&item.text, first_width, continuation_width);
-
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| DetailLine {
-            prefix: if index == 0 {
-                first_prefix.clone()
-            } else {
-                continuation_prefix.clone()
-            },
-            text,
-        })
-        .collect()
-}
-
-fn wrap_detail_text(text: &str, first_width: usize, continuation_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut first_line = true;
-
-    for logical_line in text.split('\n') {
-        if logical_line.is_empty() {
-            lines.push(String::new());
-            first_line = false;
-            continue;
-        }
-
-        let mut remaining = logical_line;
-        while !remaining.is_empty() {
-            let width = if first_line {
-                first_width
-            } else {
-                continuation_width
-            };
-            let (chunk, consumed) = take_width(remaining, width);
-            if consumed == 0 {
-                // This only occurs when a caller supplies no usable width.
-                // Keep the value intact rather than silently dropping it.
-                lines.push(remaining.to_string());
-                remaining = "";
-            } else {
-                lines.push(chunk);
-                remaining = &remaining[consumed..];
-            }
-            first_line = false;
-        }
-    }
-
-    // split('\n') yields one empty logical line for an empty string and for a
-    // trailing newline, so this also preserves an explicitly empty selection.
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn take_width(text: &str, max_width: usize) -> (String, usize) {
-    if max_width == 0 {
-        return (String::new(), 0);
-    }
-    let mut used_width = 0;
-    let mut end = 0;
-    for (index, character) in text.char_indices() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if end > 0 && used_width + character_width > max_width {
-            break;
-        }
-        used_width += character_width;
-        end = index + character.len_utf8();
-        if used_width >= max_width {
-            break;
-        }
-    }
-    (text[..end].to_string(), end)
-}
-
-fn draw_detail(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect, lines: &[DetailLine]) {
-    let Some(item) = app.selected_item() else {
-        return;
-    };
-    let text_style = app
-        .theme()
-        .kind_style(item.kind, true)
-        .add_modifier(Modifier::BOLD);
-    let prefix_style = app.theme().status_style().add_modifier(Modifier::DIM);
-    let rendered = lines
-        .iter()
-        .map(|line| {
-            Line::from(vec![
-                Span::styled(line.prefix.clone(), prefix_style),
-                Span::styled(line.text.clone(), text_style),
-            ])
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(rendered), area);
 }
 
 fn render_body(app: &ExtractApp, max_rows: usize, width: usize) -> Vec<Line<'static>> {
@@ -328,8 +174,8 @@ fn render_row(
         return Line::default();
     }
     let prefix = if selected { "▌ " } else { "  " };
-    let icon = kind_icon(item.kind, theme.use_icons);
-    let chip = format!("{} {} ", icon, item.kind.stable_key().to_ascii_uppercase());
+    // Icon only — the word PATH/URL/WORD next to the glyph was redundant.
+    let chip = format!("{} ", kind_icon(item.kind, theme.use_icons));
     let prefix_width = prefix.chars().count();
     let chip_width = chip.chars().count();
     let available = width.saturating_sub(prefix_width + chip_width);
@@ -380,10 +226,11 @@ fn row_style(theme: &crate::theme::Theme, kind: ItemKind, is_selected: bool) -> 
     }
 }
 
-/// Build the top header with the active mode, counts, and inline key hints.
+/// Build the top header with the active mode, kind filter, counts, and hints.
 pub fn status_text(
     width: usize,
     mode: crate::extract_app::ExtractMode,
+    kind_filter: KindFilter,
     query: &str,
     filtered: usize,
     total: usize,
@@ -393,6 +240,7 @@ pub fn status_text(
         width,
         mode,
         ExtractionEngine::Regex,
+        kind_filter,
         query,
         filtered,
         total,
@@ -400,10 +248,12 @@ pub fn status_text(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn status_text_with_engine(
     width: usize,
     mode: crate::extract_app::ExtractMode,
     engine: ExtractionEngine,
+    kind_filter: KindFilter,
     query: &str,
     filtered: usize,
     total: usize,
@@ -412,12 +262,18 @@ pub fn status_text_with_engine(
     let _ = (query, message);
     let mode = mode.name().to_ascii_uppercase();
     let engine = engine.name().to_ascii_uppercase();
+    let kind = kind_filter.name();
     let variants = [
-        format!(" {mode}:{engine}  {filtered}/{total}  ·  tab mode  ·  enter copy  ·  esc cancel "),
-        format!(" {mode}:{engine}  {filtered}/{total}  · tab mode · enter copy · esc cancel "),
-        format!(" {mode}:{engine} {filtered}/{total} · tab mode · enter copy "),
-        format!(" {mode}:{engine} {filtered}/{total} · tab mode"),
-        format!(" {mode}:{engine} {filtered}/{total}"),
+        format!(
+            " {mode}:{engine}  {kind}  {filtered}/{total}  ·  tab mode  ·  s-tab kind  ·  enter copy  ·  esc cancel "
+        ),
+        format!(
+            " {mode}:{engine}  {kind}  {filtered}/{total}  · tab mode · s-tab kind · enter copy · esc cancel "
+        ),
+        format!(" {mode}:{engine} {kind} {filtered}/{total} · tab mode · s-tab kind · enter copy "),
+        format!(" {mode}:{engine} {kind} {filtered}/{total} · tab mode · s-tab kind"),
+        format!(" {mode}:{engine} {kind} {filtered}/{total}"),
+        format!(" {mode}:{engine} {kind}"),
         format!(" {mode}:{engine}"),
         " EXTRACT".to_string(),
     ];
@@ -474,37 +330,57 @@ fn truncate(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract_app::ExtractMode;
+    use crate::extract_app::{ExtractMode, KindFilter};
     use pretty_assertions::assert_eq;
 
     #[test]
     fn status_text_keeps_help_when_width_allows() {
-        let text = status_text(140, ExtractMode::Scrollback, "path", 3, 12, "");
+        let text = status_text(
+            160,
+            ExtractMode::Scrollback,
+            KindFilter::All,
+            "path",
+            3,
+            12,
+            "",
+        );
         assert!(text.contains("enter copy"));
         assert!(text.contains("esc cancel"));
         assert!(text.contains("tab mode"));
+        assert!(text.contains("s-tab kind"));
         assert!(text.contains("SCROLLBACK"));
-        assert!(text.chars().count() <= 140);
+        assert!(text.contains("all"));
+        assert!(text.chars().count() <= 160);
     }
 
     #[test]
-    fn status_text_shows_the_active_mode() {
-        let scrollback = status_text(100, ExtractMode::Scrollback, "-", 4, 9, "");
+    fn status_text_shows_the_active_mode_and_kind_filter() {
+        let scrollback = status_text(
+            120,
+            ExtractMode::Scrollback,
+            KindFilter::Path,
+            "-",
+            4,
+            9,
+            "",
+        );
         assert!(scrollback.contains("SCROLLBACK"));
-        let global = status_text(100, ExtractMode::Global, "-", 4, 9, "");
+        assert!(scrollback.contains("path"));
+        let global = status_text(120, ExtractMode::Global, KindFilter::Url, "-", 4, 9, "");
         assert!(global.contains("GLOBAL"));
+        assert!(global.contains("url"));
     }
 
     #[test]
     fn status_text_fits_narrow_width() {
-        let text = status_text(10, ExtractMode::Global, "abc", 1, 2, "");
+        let text = status_text(10, ExtractMode::Global, KindFilter::All, "abc", 1, 2, "");
         assert!(text.chars().count() <= 10);
         assert!(text.contains("GLOBAL") || text.contains("EXTRACT"));
     }
 
     #[test]
     fn status_text_shows_counts() {
-        let text = status_text(80, ExtractMode::Scrollback, "-", 4, 9, "");
+        let text = status_text(80, ExtractMode::Scrollback, KindFilter::All, "-", 4, 9, "");
         assert!(text.contains("4/9"));
     }
 
@@ -515,65 +391,38 @@ mod tests {
     }
 
     #[test]
-    fn selected_detail_wrap_preserves_the_complete_string() {
+    fn row_chip_is_icon_only_without_kind_word() {
+        use crate::theme::Theme;
+        use ratatui::style::Color;
+
+        let theme = Theme {
+            use_icons: false,
+            match_fg: Color::Gray,
+            match_bg: Some(Color::Black),
+            selected_match_fg: Color::Rgb(0, 0, 0),
+            selected_match_bg: Color::Rgb(223, 142, 29),
+            ..Theme::default()
+        };
         let item = ExtractItem {
-            text: "/home/jon/.pi/agent-sessions/2026-09-11/session--long-path".to_string(),
+            text: "/tmp/demo".into(),
             kind: ItemKind::Path,
         };
-        let lines = compose_detail_lines(&item, 24, false);
-        let reconstructed: String = lines.iter().map(|line| line.text.as_str()).collect();
-
-        assert_eq!(reconstructed, item.text);
-        assert!(lines.len() > 1);
-        assert!(lines.iter().all(|line| !line.text.contains('…')));
-    }
-
-    #[test]
-    fn selected_detail_drops_decoration_when_the_pane_is_too_narrow() {
-        let item = ExtractItem {
-            text: "abcdef".to_string(),
-            kind: ItemKind::Word,
-        };
-        let lines = compose_detail_lines(&item, 3, false);
-
-        assert_eq!(
-            lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<String>(),
-            item.text
+        let line = render_row(&theme, true, &item, &[], 40);
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.contains("P "));
+        assert!(rendered.contains("/tmp/demo"));
+        assert!(
+            !rendered.to_ascii_uppercase().contains("PATH"),
+            "kind word must not appear next to the icon: {rendered}"
         );
-        assert!(lines.iter().all(|line| line.prefix.is_empty()));
-    }
-
-    #[test]
-    fn selected_detail_tracks_navigation_and_typeahead_selection() {
-        let first = "/tmp/first-long-path";
-        let second = "/tmp/second-long-path";
-        let mut app = ExtractApp::new(
-            [first, second]
-                .into_iter()
-                .map(|text| ExtractItem {
-                    text: text.to_string(),
-                    kind: ItemKind::Path,
-                })
-                .collect(),
-            crate::theme::Theme::default(),
+        assert!(
+            !rendered.to_ascii_uppercase().contains("URL"),
+            "kind word must not appear: {rendered}"
         );
-
-        let displayed = |app: &ExtractApp| {
-            selected_detail_lines(app, 80)
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<String>()
-        };
-        assert_eq!(displayed(&app), first);
-
-        app.handle_input(crate::extract_app::ExtractInput::Down);
-        assert_eq!(displayed(&app), second);
-
-        app.handle_input(crate::extract_app::ExtractInput::Char('f'));
-        assert_eq!(displayed(&app), first);
     }
 
     #[test]
@@ -603,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_geometry_renders_the_full_frame_width_without_clipping_the_selection() {
+    fn narrow_geometry_renders_list_without_selection_preview() {
         let long_path =
             "/long/lab/path/selected-detail-keeps-rendering-past-the-narrow-pane-rectangle-x"
                 .to_string();
@@ -645,20 +494,25 @@ mod tests {
                 .collect()
         };
 
-        // Header, prompt, and body chrome still render at the full PTY width.
+        // Header + prompt only; body starts immediately (no selected-item preview).
         assert!(row_text(0).contains("SCROLLBACK"));
         assert!(row_text(1).starts_with("> "));
-
-        // The selected detail is soft-wrapped at the full frame width, so its
-        // content fills columns beyond the 30-column pane rectangle.
-        let first_detail_row = row_text(2);
-        assert!(first_detail_row.trim_end().chars().count() > 30);
-        let detail_prefix = "  P PATH ";
-        let continuation_prefix_len = detail_prefix.len();
-        let second_row = row_text(3).trim_end().to_string();
-        let detail = row_text(2).trim_end().to_string() + &second_row[continuation_prefix_len..];
-        assert_eq!(detail, format!("{detail_prefix}{long_path}"));
-        assert!(!detail.contains('…'));
+        let first_body = row_text(2);
+        assert!(
+            first_body.contains("P ") && first_body.contains("/long/lab"),
+            "first body row should be the list entry, not a preview: {first_body}"
+        );
+        // Chip is icon-only: "P " then the value — not the word "PATH" as a label.
+        assert!(
+            !first_body.contains("P PATH") && !first_body.contains("PATH "),
+            "no kind word label on the row: {first_body}"
+        );
+        // Second list row is the URL — proves body is the list, not a multi-line preview.
+        let second_body = row_text(3);
+        assert!(
+            second_body.contains("U ") && second_body.contains("example.com"),
+            "second body row should be the next list entry: {second_body}"
+        );
     }
 
     #[test]
@@ -691,14 +545,7 @@ mod tests {
     fn drawable_layout_puts_header_at_top_and_reserves_measured_chrome_rows() {
         let area = Rect::new(2, 3, 30, 12);
 
-        assert_eq!(
-            drawable_body_area_with_detail(area, 0),
-            Rect::new(2, 5, 30, 7)
-        );
-        assert_eq!(
-            drawable_body_area_with_detail(area, 3),
-            Rect::new(2, 8, 30, 4)
-        );
+        assert_eq!(drawable_body_area(area), Rect::new(2, 5, 30, 7));
         assert_eq!(drawable_status_area(area), Some(Rect::new(2, 3, 30, 1)));
         assert_eq!(reserved_bottom_rows(area), Some(Rect::new(2, 12, 30, 3)));
     }
@@ -707,10 +554,7 @@ mod tests {
     fn drawable_layout_keeps_header_visible_in_a_short_area() {
         let area = Rect::new(0, 4, 20, 1);
 
-        assert_eq!(
-            drawable_body_area_with_detail(area, 0),
-            Rect::new(0, 4, 20, 0)
-        );
+        assert_eq!(drawable_body_area(area), Rect::new(0, 4, 20, 0));
         assert_eq!(drawable_status_area(area), Some(Rect::new(0, 4, 20, 1)));
         assert_eq!(reserved_bottom_rows(area), None);
     }

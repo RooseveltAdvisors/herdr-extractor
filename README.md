@@ -18,14 +18,14 @@ probe, config paths, an artifact hash, quoted failure reasons.
 ![A terminal pane showing a deploy session: git log, cargo test, a deploy script, a 503 health probe failure, kubectl output, and a revert](docs/demo/01-scrollback.png)
 
 **2 · `prefix+space` — every token, typed and ranked.** 110 candidates pulled out of that pane, each
-tagged with its semantic kind (`URL`, `PATH`, `HASH`, `COMMAND`, `QUOTE`, `WORD`) and its own color
-and glyph. The selected row is marked by a full-width highlight that survives any terminal theme.
+with a kind icon and color (no redundant PATH/URL/WORD labels). The selected row is marked by a
+full-width highlight that survives any terminal theme.
 
 ![The extract picker listing 110 tokens with colored kind chips and Nerd Font glyphs, the top row highlighted](docs/demo/02-picker.png)
 
 **3 · Fuzzy typeahead, in-house.** `stg` is a subsequence, not a substring — it reaches
 `/srv/releases/staging/…` and `https://staging.example.internal/…` alike. Matched characters are
-underlined in place, and the wrapped detail line above the list always shows the complete selection.
+underlined in place. `Shift-Tab` / `Ctrl-t` cycles a kind filter (`all` → `path` → `url` → `word` → `other`).
 
 ![The same picker filtered to 11 of 110 tokens by the query "stg", with the matched characters underlined in each row](docs/demo/03-fuzzy.png)
 
@@ -68,13 +68,24 @@ Toggling re-extracts live and keeps the current filter query and selection where
 active mode is always visible in the top header, and the hint text names the toggle
 (`tab mode`).
 
-The picker uses a dense gh-dash-inspired layout: a colored top header shows the mode and active
-engine badge (`SCROLLBACK:REGEX`, `GLOBAL:NLP`), match count, and `tab mode · enter copy · esc
-cancel` hints; each row has a semantic color, compact kind chip, and Nerd-Font glyph (with ASCII
-fallback); a prompt line shows the live query and a wrapped detail area shows the complete selected
-item; the list highlights matched characters. The header is intentionally top-anchored so
-all captain-facing status survives Herdr's measured bottom overlay chrome. Three bottom pane rows
-are reserved as decoration, controlled by the documented `RESERVED_BOTTOM_ROWS` constant.
+### In-menu kind filter (`Shift-Tab` / `Ctrl-t`)
+
+Cycle the semantic kind filter without typing into the query:
+
+`all` → `path` → `url` → `word` → `other` → `all`
+
+`other` is everything that is not path/url/word (command, hash, version, error, quote, code, …).
+The active kind name appears in the header next to the match counts. Typeahead still applies on
+top of the kind filter.
+
+The picker uses a dense layout: a colored top header shows the mode/engine badge
+(`SCROLLBACK:REGEX`), kind filter, match count, and
+`tab mode · s-tab kind · enter copy · esc cancel` hints; each row has a semantic color and a
+Nerd-Font (or ASCII) kind icon only — no PATH/URL/WORD word next to the glyph; a prompt line
+shows the live query; the list highlights matched characters and the selection itself. There is
+no separate “selected item” preview above the list. The header is top-anchored so captain-facing
+status survives Herdr's measured bottom overlay chrome. Three bottom pane rows are reserved as
+decoration (`RESERVED_BOTTOM_ROWS`).
 
 Matching is implemented in-house with the existing ratatui/crossterm stack: smart-case
 subsequence matching scores contiguous runs and word-boundary starts, and adds no external `fzf`
@@ -96,8 +107,9 @@ live mode re-extraction directly.
    slivers are discarded. Canonicalized duplicates collapse to one item, ranked by recency,
    semantic usefulness, length, and character variety.
 4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
-   scrollback and global (full session history) modes. `Enter` copies exactly one item
-   through OSC 52. `Esc` or `Ctrl-C` cancels.
+   scrollback and global (full session history) modes. `Shift-Tab` or `Ctrl-t` cycles the kind
+   filter (`all` / `path` / `url` / `word` / `other`). `Enter` copies exactly one item through
+   OSC 52. `Esc` or `Ctrl-C` cancels.
 
 ### Session transcript extract (`extract_transcript`)
 
