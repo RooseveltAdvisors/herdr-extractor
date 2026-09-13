@@ -308,6 +308,8 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
+            // Ctrl-t cycles kind filter (all → path → url → word → other).
+            KeyCode::Char('t') | KeyCode::Char('T') => Some(ExtractInput::CycleKindFilter),
             _ => None,
         };
     }
@@ -318,6 +320,8 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
         KeyCode::Up => Some(ExtractInput::Up),
         KeyCode::Down => Some(ExtractInput::Down),
         KeyCode::Tab => Some(ExtractInput::SwitchMode),
+        // Shift-Tab cycles kind filter without eating typeahead characters.
+        KeyCode::BackTab => Some(ExtractInput::CycleKindFilter),
         KeyCode::Char(character) => Some(ExtractInput::Char(character)),
         _ => None,
     }
@@ -427,6 +431,14 @@ mod tests {
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Some(ExtractInput::SwitchMode)
+        );
+        assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(ExtractInput::CycleKindFilter)
+        );
+        assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Some(ExtractInput::CycleKindFilter)
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),

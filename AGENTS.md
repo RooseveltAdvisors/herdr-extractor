@@ -10,10 +10,12 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
 - `scripts/open-extractor`: action launcher taking the entrypoint id as `$1`; stale-`HERDR_BIN_PATH` fallback.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
 - `src/nlp.rs`: optional bounded Unix-socket sidecar protocol; no model is bundled.
-- `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
-  (scrollback/global) toggle state; `Tab` inside the picker requests a mode switch through
-  `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
-- `src/extract_ui.rs`: ratatui renderer (top header, query prompt, fuzzy-match highlighting).
+- `src/extract_app.rs`: pure typeahead/selection state machine plus `ExtractMode`
+  (scrollback/global) and `KindFilter` (all/path/url/word/other). `Tab` requests a mode switch
+  through `Outcome::SwitchMode` (main re-reads the pane source live). `Shift-Tab` / `Ctrl-t`
+  cycles the kind filter in-process without touching the query.
+- `src/extract_ui.rs`: ratatui renderer — top header, query prompt, icon-only kind marks (no
+  PATH/URL/WORD words), fuzzy-match highlighting. No selected-item preview above the list.
 - `src/herdr_client.rs`: bounded Unix-socket calls for scrollback/transcript text, pane layout and
   scroll state, and notifications.
 - `src/clipboard.rs`: OSC 52 copy.

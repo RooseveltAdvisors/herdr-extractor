@@ -3,7 +3,7 @@
 //! Pure state machine: filter items by query, move the selection, copy or cancel.
 //! No terminal I/O — fully unit-testable.
 
-use crate::extract::ExtractItem;
+use crate::extract::{ExtractItem, ItemKind};
 use crate::theme::Theme;
 use crate::Outcome;
 
@@ -56,6 +56,50 @@ impl ExtractMode {
     }
 }
 
+/// Restrict the list to one semantic family. Cycles with Shift-Tab / Ctrl-t.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KindFilter {
+    #[default]
+    All,
+    Path,
+    Url,
+    Word,
+    /// Everything that is not path/url/word (command, hash, quote, …).
+    Other,
+}
+
+impl KindFilter {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Path,
+            Self::Path => Self::Url,
+            Self::Url => Self::Word,
+            Self::Word => Self::Other,
+            Self::Other => Self::All,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Path => "path",
+            Self::Url => "url",
+            Self::Word => "word",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn matches(self, kind: ItemKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Path => kind == ItemKind::Path,
+            Self::Url => kind == ItemKind::Url,
+            Self::Word => kind == ItemKind::Word,
+            Self::Other => !matches!(kind, ItemKind::Path | ItemKind::Url | ItemKind::Word),
+        }
+    }
+}
+
 /// Inputs the extract TUI maps onto the pure state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtractInput {
@@ -67,6 +111,7 @@ pub enum ExtractInput {
     Esc,
     CtrlC,
     SwitchMode,
+    CycleKindFilter,
 }
 
 impl ExtractInput {
@@ -80,8 +125,14 @@ impl ExtractInput {
             TAB => Self::SwitchMode,
             UP => Self::Up,
             DOWN => Self::Down,
+            '\u{14}' => Self::CycleKindFilter, // DC4 — cycle_kind_sentinel
             other => Self::Char(other),
         }
+    }
+
+    /// Sentinel for char-only drivers that cannot emit BackTab / Ctrl-t.
+    pub fn cycle_kind_sentinel() -> char {
+        '\u{14}' // DC4
     }
 
     pub fn up_sentinel() -> char {
@@ -108,6 +159,7 @@ pub struct ExtractApp {
     message: Option<String>,
     mode: ExtractMode,
     engine: ExtractionEngine,
+    kind_filter: KindFilter,
     theme: Theme,
 }
 
@@ -121,6 +173,7 @@ impl ExtractApp {
             message: None,
             mode: ExtractMode::Scrollback,
             engine: ExtractionEngine::Regex,
+            kind_filter: KindFilter::All,
             theme,
         };
         app.refilter();
@@ -167,6 +220,11 @@ impl ExtractApp {
                 Outcome::Continue
             }
             ExtractInput::SwitchMode => Outcome::SwitchMode(self.mode.toggle()),
+            ExtractInput::CycleKindFilter => {
+                self.kind_filter = self.kind_filter.cycle();
+                self.refilter();
+                Outcome::Continue
+            }
             ExtractInput::Char(ch) => {
                 if ch.is_control() {
                     return Outcome::Continue;
@@ -203,7 +261,14 @@ impl ExtractApp {
 
     fn refilter(&mut self) {
         let selected_item = self.filtered.get(self.selected).map(|item| item.index);
-        self.filtered = fuzzy_matches(&self.items, &self.query);
+        self.filtered = fuzzy_matches(&self.items, &self.query)
+            .into_iter()
+            .filter(|item_match| {
+                self.items
+                    .get(item_match.index)
+                    .is_some_and(|item| self.kind_filter.matches(item.kind))
+            })
+            .collect();
         if self.filtered.is_empty() {
             self.selected = 0;
             self.message = Some("no matches".to_string());
@@ -245,6 +310,10 @@ impl ExtractApp {
         self.engine
     }
 
+    pub fn kind_filter(&self) -> KindFilter {
+        self.kind_filter
+    }
+
     pub fn set_engine(&mut self, engine: ExtractionEngine) {
         self.engine = engine;
     }
@@ -282,6 +351,14 @@ impl ExtractApp {
 
     pub fn total_count(&self) -> usize {
         self.items.len()
+    }
+
+    /// Items in the active kind filter before the typeahead query.
+    pub fn pool_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| self.kind_filter.matches(item.kind))
+            .count()
     }
 
     /// Filtered items in display order: `(is_selected, text)`.
@@ -717,5 +794,92 @@ single: 'single-quoted-token'\n";
         assert_eq!(a.message(), Some("reading global history..."));
         a.handle_char('a');
         assert_eq!(a.message(), None);
+    }
+
+    fn mixed_kind_app() -> ExtractApp {
+        ExtractApp::new(
+            vec![
+                ExtractItem {
+                    text: "https://example.com".into(),
+                    kind: ItemKind::Url,
+                },
+                ExtractItem {
+                    text: "/tmp/path".into(),
+                    kind: ItemKind::Path,
+                },
+                ExtractItem {
+                    text: "plain-word".into(),
+                    kind: ItemKind::Word,
+                },
+                ExtractItem {
+                    text: "cargo test".into(),
+                    kind: ItemKind::Command,
+                },
+                ExtractItem {
+                    text: "deadbeef".into(),
+                    kind: ItemKind::Hash,
+                },
+            ],
+            Theme::default(),
+        )
+    }
+
+    #[test]
+    fn kind_filter_cycles_all_path_url_word_other() {
+        let mut a = mixed_kind_app();
+        assert_eq!(a.kind_filter(), KindFilter::All);
+        assert_eq!(a.filtered_count(), 5);
+
+        a.handle_input(ExtractInput::CycleKindFilter);
+        assert_eq!(a.kind_filter(), KindFilter::Path);
+        assert_eq!(a.filtered_count(), 1);
+        assert_eq!(a.selected_item().unwrap().text, "/tmp/path");
+
+        a.handle_input(ExtractInput::CycleKindFilter);
+        assert_eq!(a.kind_filter(), KindFilter::Url);
+        assert_eq!(a.selected_item().unwrap().text, "https://example.com");
+
+        a.handle_input(ExtractInput::CycleKindFilter);
+        assert_eq!(a.kind_filter(), KindFilter::Word);
+        assert_eq!(a.selected_item().unwrap().text, "plain-word");
+
+        a.handle_input(ExtractInput::CycleKindFilter);
+        assert_eq!(a.kind_filter(), KindFilter::Other);
+        let rows = a.visible_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|(_, text)| *text == "cargo test"));
+        assert!(rows.iter().any(|(_, text)| *text == "deadbeef"));
+
+        a.handle_input(ExtractInput::CycleKindFilter);
+        assert_eq!(a.kind_filter(), KindFilter::All);
+        assert_eq!(a.filtered_count(), 5);
+    }
+
+    #[test]
+    fn kind_filter_composes_with_typeahead() {
+        let mut a = mixed_kind_app();
+        a.handle_input(ExtractInput::CycleKindFilter); // path
+        a.handle_input(ExtractInput::Char('t'));
+        assert_eq!(a.filtered_count(), 1);
+        assert_eq!(a.selected_item().unwrap().text, "/tmp/path");
+
+        a.handle_input(ExtractInput::CycleKindFilter); // url — query still "t"
+        assert_eq!(a.kind_filter(), KindFilter::Url);
+        // "https://example.com" does not fuzzy-match "t" alone? actually 't' matches many
+        // Ensure path is gone.
+        assert!(a
+            .visible_rows()
+            .iter()
+            .all(|(_, text)| !text.contains("/tmp")));
+    }
+
+    #[test]
+    fn kind_filter_names_and_cycle_round_trip() {
+        assert_eq!(KindFilter::All.name(), "all");
+        assert_eq!(KindFilter::Other.name(), "other");
+        assert_eq!(
+            KindFilter::All.cycle().cycle().cycle().cycle().cycle(),
+            KindFilter::All
+        );
     }
 }
