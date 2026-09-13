@@ -308,6 +308,7 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
+            KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::SwitchMode),
             _ => None,
         };
     }
@@ -430,7 +431,11 @@ mod tests {
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-            None
+            Some(ExtractInput::SwitchMode)
+        );
+        assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::CONTROL)),
+            Some(ExtractInput::SwitchMode)
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
