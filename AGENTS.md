@@ -11,7 +11,7 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
 - `src/nlp.rs`: optional bounded Unix-socket sidecar protocol; no model is bundled.
 - `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
-  (scrollback/global) toggle state; `Tab` inside the picker requests a mode switch through
+  (scrollback/global) toggle state; `ctrl+g` and `Tab` inside the picker request a mode switch through
   `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
 - `src/extract_ui.rs`: ratatui renderer (top header, query prompt, fuzzy-match highlighting).
 - `src/herdr_client.rs`: bounded Unix-socket calls for scrollback/transcript text, pane layout and
@@ -19,7 +19,7 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
 - `src/clipboard.rs`: OSC 52 copy.
 - The pane entrypoint (`HERDR_PLUGIN_ENTRYPOINT_ID`: `extract` vs `extract-transcript`) selects the
   initial read mode in `src/main.rs`; the transcript/global read never falls back to
-  viewport-shaped sources. The in-picker `Tab` toggle is the primary path between modes; the
+  viewport-shaped sources. The in-picker `ctrl+g`/`Tab` toggle is the primary path between modes; the
   `extract_transcript` action only exists to land directly in global mode.
 
 Keep pure extraction and state behavior covered by unit tests. Preserve the public lineage credit to
