@@ -13,6 +13,7 @@ const BACKSPACE_BS: char = '\u{8}';
 const BACKSPACE_DEL: char = '\u{7f}';
 const ENTER: char = '\n';
 const TAB: char = '\t';
+const CTRL_G: char = '\u{7}'; // Ctrl+G, restored alias of Tab for the mode toggle
 const UP: char = '\u{11}'; // DC1 — internal sentinel for Up
 const DOWN: char = '\u{12}'; // DC2 — internal sentinel for Down
 
@@ -78,6 +79,7 @@ impl ExtractInput {
             BACKSPACE_BS | BACKSPACE_DEL => Self::Backspace,
             ENTER | '\r' => Self::Enter,
             TAB => Self::SwitchMode,
+            CTRL_G => Self::SwitchMode,
             UP => Self::Up,
             DOWN => Self::Down,
             other => Self::Char(other),
@@ -630,6 +632,19 @@ single: 'single-quoted-token'\n";
         assert_eq!(
             a.handle_input(ExtractInput::SwitchMode),
             Outcome::SwitchMode(ExtractMode::Scrollback)
+        );
+    }
+
+    #[test]
+    fn ctrl_g_toggles_mode_like_tab() {
+        let mut a = app(&["alpha-token"]);
+        assert_eq!(
+            a.handle_char('\u{7}'),
+            Outcome::SwitchMode(ExtractMode::Global)
+        );
+        assert_eq!(
+            a.handle_char('\u{7}'),
+            Outcome::SwitchMode(ExtractMode::Global)
         );
     }
 
