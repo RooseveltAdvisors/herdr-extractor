@@ -51,9 +51,10 @@ One action, one picker, two data modes:
 | `RooseveltAdvisors.herdr-extractor.extract` | `prefix+space` | Retained pane scrollback; press `Tab` inside the picker to switch to the full saved session history |
 | `RooseveltAdvisors.herdr-extractor.extract_transcript` | optional (for example `prefix+shift+space`) | The pane's full retained session transcript, opening the picker straight in global mode |
 
-### In-menu mode toggle (`Tab`)
+### In-menu mode toggle (`Tab` or `Ctrl-g`)
 
-The `prefix+space` extract picker has a mode toggle built in. Press `Tab` inside the overlay to
+The `prefix+space` extract picker has a mode toggle built in. Press `Tab` or `Ctrl-g` inside the
+overlay to
 switch between the two data modes:
 
 - **scrollback mode** (`SCROLLBACK` in the header): the focused pane's retained
@@ -95,8 +96,8 @@ live mode re-extraction directly.
    code. ANSI/SGR residue, box fragments, ratios, percentages, punctuation tails, and wrapped
    slivers are discarded. Canonicalized duplicates collapse to one item, ranked by recency,
    semantic usefulness, length, and character variety.
-4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
-   scrollback and global (full session history) modes. `Enter` copies exactly one item
+4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` or `Ctrl-g` toggles
+   between scrollback and global (full session history) modes. `Enter` copies exactly one item
    through OSC 52. `Esc` or `Ctrl-C` cancels.
 
 ### Session transcript extract (`extract_transcript`)
