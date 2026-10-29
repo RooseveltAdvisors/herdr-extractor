@@ -306,6 +306,10 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
+            // ctrl+g is the #6 mode-toggle binding. PR #10's picker rewrite
+            // dropped it while adding Tab; keep Tab primary and ctrl+g as its
+            // alias so the shipped shortcut keeps working.
+            KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::SwitchMode),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
             _ => None,
@@ -430,11 +434,33 @@ mod tests {
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-            None
+            Some(ExtractInput::SwitchMode)
+        );
+        assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::CONTROL)),
+            Some(ExtractInput::SwitchMode)
         );
         assert_eq!(
             key_to_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
             Some(ExtractInput::Char('x'))
+        );
+    }
+
+    #[test]
+    fn ctrl_g_toggles_mode_as_the_shipped_alias() {
+        // Regression for the #6 binding lost in PR #10's key-map rewrite:
+        // ctrl+g must reach the same SwitchMode path as Tab.
+        for ch in ['g', 'G'] {
+            assert_eq!(
+                key_to_input(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)),
+                Some(ExtractInput::SwitchMode),
+                "ctrl+{ch} must request a mode switch"
+            );
+        }
+        assert_eq!(
+            key_to_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(ExtractInput::SwitchMode),
+            "Tab stays the primary toggle"
         );
     }
 
