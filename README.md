@@ -29,7 +29,7 @@ underlined in place, and the wrapped detail line above the list always shows the
 
 ![The same picker filtered to 11 of 110 tokens by the query "stg", with the matched characters underlined in each row](docs/demo/03-fuzzy.png)
 
-**4 · `Tab` switches to the whole session.** Scrollback mode reads the pane's retained scrollback;
+**4 · `Tab` switches to the whole session** (`ctrl-g` does the same). Scrollback mode reads the pane's retained scrollback;
 global mode reads the pane's full saved session history — here 190 tokens instead of 110, including
 lines that scrolled past Herdr's 1000-line `pane.read` cap. The badge in the header always names the
 active mode, and the filter query survives the toggle.
