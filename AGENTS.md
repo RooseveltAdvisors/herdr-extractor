@@ -73,3 +73,9 @@ Never commit `target/`, runtime logs, or local editor files.
 
 Update this file only for durable repository-wide guidance. Prefer pointers to authoritative files
 and commands over duplicated implementation details, and remove stale guidance when behavior moves.
+
+## Ship path (captain 2026-11-03)
+
+Prefer **direct PR + yolo** for this repo. Do not require no-mistakes as a PR gate.
+`.no-mistakes.yaml` already declares `no_ci: true`. Branch protection is unset.
+Use `cargo fmt/test/clippy` locally, push the feature branch, open the PR.
