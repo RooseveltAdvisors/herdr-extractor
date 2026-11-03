@@ -120,7 +120,12 @@ impl SocketClient {
     }
 
     pub fn read_visible_pane(&mut self, pane_id: &str) -> Result<String> {
-        Ok(self.read_pane_source(pane_id, "visible", None)?.text)
+        Ok(self.read_screen_pane(pane_id)?.text)
+    }
+
+    /// Read only the current on-screen viewport (Herdr `source = "visible"`).
+    pub fn read_screen_pane(&mut self, pane_id: &str) -> Result<PaneText> {
+        self.read_pane_source(pane_id, "visible", None)
     }
 
     /// Read the pane's persisted session history when Herdr saves it

@@ -1,8 +1,10 @@
 pub mod clipboard;
 pub mod config;
+pub mod entity;
 pub mod extract;
 pub mod extract_app;
 pub mod extract_ui;
+pub mod help;
 pub mod herdr_client;
 pub mod nlp;
 pub mod session_history;

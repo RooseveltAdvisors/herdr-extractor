@@ -9,7 +9,10 @@ It must remain separate from the `RooseveltAdvisors.herdr-leap` jump overlay.
   pane `extract`) and `extract_transcript` (full retained transcript, pane `extract-transcript`).
 - `scripts/open-extractor`: action launcher taking the entrypoint id as `$1`; stale-`HERDR_BIN_PATH` fallback.
 - `src/extract.rs`: pure scrollback token extraction and soft-wrap reconstruction.
-- `src/nlp.rs`: optional bounded Unix-socket sidecar protocol; no model is bundled.
+- `src/entity.rs`: built-in entity resolver (pattern NER + phrase chunker + linear
+  scorer weights). Always runs inside `extract`; no external runtime.
+- `src/nlp.rs`: optional bounded Unix-socket sidecar protocol for heavier external
+  models; the binary still opens without one.
 - `src/extract_app.rs`: pure typeahead/selection state machine plus the `ExtractMode`
   (scrollback/global) toggle state; `Tab` (and its `ctrl+g` alias) inside the picker requests a mode switch through
   `Outcome::SwitchMode` and `src/main.rs` re-reads the pane source live, keeping the filter query.
@@ -26,8 +29,10 @@ Keep pure extraction and state behavior covered by unit tests. Preserve the publ
 `laktak/extrakto` in README, LICENSE notes, and manifest metadata.
 
 The extractor's stable semantic kinds are `url`, `path`, `quote`, `squote`, `word`, `command`,
-`hash`, `version`, `error`, and `code`. Their colors/icons and the optional `[nlp]` sidecar are
-configured in README's Configuration section; regex extraction is the default and fallback.
+`hash`, `version`, `error`, `code`, `email`, `ip`, `uuid`, `host`, `id`, `env`, and `phrase`.
+Their colors/icons and the optional `[nlp]` sidecar are configured in README's Configuration
+section. Pattern filters plus the built-in entity resolver always run; the sidecar is an
+optional extra merge pass.
 
 ## Development
 

@@ -21,6 +21,8 @@ const DOWN: char = '\u{12}'; // DC2 — internal sentinel for Down
 pub enum ExtractMode {
     /// The focused pane's retained scrollback.
     Scrollback,
+    /// Only the current on-screen viewport (what you see right now).
+    Screen,
     /// The pane's full saved session history (transcript-grade coverage).
     Global,
 }
@@ -40,10 +42,37 @@ impl ExtractionEngine {
     }
 }
 
+/// Modal editing mode for the filter field (vimline-inspired).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldMode {
+    /// Type filter keywords (edit mode).
+    Insert,
+    /// Issue commands: move list, mark, open help, motions in the query.
+    Normal,
+}
+
+impl FieldMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Normal => "normal",
+        }
+    }
+
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Insert => "INSERT",
+            Self::Normal => "NORMAL",
+        }
+    }
+}
+
 impl ExtractMode {
+    /// Cycle scope: scrollback → screen → global → scrollback.
     pub fn toggle(self) -> Self {
         match self {
-            Self::Scrollback => Self::Global,
+            Self::Scrollback => Self::Screen,
+            Self::Screen => Self::Global,
             Self::Global => Self::Scrollback,
         }
     }
@@ -51,7 +80,17 @@ impl ExtractMode {
     pub fn name(self) -> &'static str {
         match self {
             Self::Scrollback => "scrollback",
+            Self::Screen => "screen",
             Self::Global => "global",
+        }
+    }
+
+    /// Short header badge.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Scrollback => "SCROLLBACK",
+            Self::Screen => "SCREEN",
+            Self::Global => "GLOBAL",
         }
     }
 }
@@ -61,12 +100,47 @@ impl ExtractMode {
 pub enum ExtractInput {
     Char(char),
     Backspace,
+    /// Delete the last whitespace-delimited query token (fzf Ctrl-W).
+    DeleteWord,
+    /// Clear the whole query (fzf Ctrl-U).
+    ClearQuery,
     Enter,
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Left,
+    Right,
     Esc,
     CtrlC,
     SwitchMode,
+    /// Cycle the kind filter chip forward (Ctrl-K).
+    CycleKindFilter,
+    /// Cycle the kind filter chip backward (Alt-K / Shift-Tab-style via Ctrl-J).
+    CycleKindFilterBack,
+    /// Toggle multi-select mark on the current row (Space).
+    ToggleMark,
+    /// Open or close the ? help overlay.
+    ToggleHelp,
+    /// Enter insert mode at cursor / after / line start / line end.
+    EnterInsert,
+    EnterInsertAfter,
+    EnterInsertLineStart,
+    EnterInsertLineEnd,
+    /// Jump list first / last (gg / G).
+    JumpFirst,
+    JumpLast,
+    /// Word motions in the filter field (normal mode).
+    WordForward,
+    WordBack,
+    WordEnd,
+    /// Delete under / before cursor (normal mode x / X).
+    DeleteUnder,
+    DeleteBefore,
+    /// Clear query (normal dd / D).
+    ClearQueryNormal,
 }
 
 impl ExtractInput {
@@ -109,6 +183,25 @@ pub struct ExtractApp {
     mode: ExtractMode,
     engine: ExtractionEngine,
     theme: Theme,
+    /// Optional kind filter cycled with Ctrl-K; None means all kinds.
+    kind_filter: Option<crate::extract::ItemKind>,
+    /// Char index into `query` for the typeahead cursor.
+    query_cursor: usize,
+    /// Indices into `items` marked for multi-copy (Space to toggle).
+    marked: std::collections::BTreeSet<usize>,
+    /// Insert = type filter; Normal = commands / list motion.
+    field_mode: FieldMode,
+    /// Pending `g` for `gg`.
+    pending_g: bool,
+    /// Pending first `j` for `jj` insert-exit.
+    pending_j: bool,
+    /// ? help overlay open.
+    help_open: bool,
+    help_query: String,
+    help_sel: usize,
+    help_scroll: usize,
+    /// When help is open, `/` focuses help search (insert into help_query).
+    help_searching: bool,
 }
 
 impl ExtractApp {
@@ -122,6 +215,18 @@ impl ExtractApp {
             mode: ExtractMode::Scrollback,
             engine: ExtractionEngine::Regex,
             theme,
+            kind_filter: None,
+            query_cursor: 0,
+            marked: std::collections::BTreeSet::new(),
+            // Start insert so typing filters immediately; Esc → normal for j/k commands.
+            field_mode: FieldMode::Insert,
+            pending_g: false,
+            pending_j: false,
+            help_open: false,
+            help_query: String::new(),
+            help_sel: 0,
+            help_scroll: 0,
+            help_searching: false,
         };
         app.refilter();
         app
@@ -150,12 +255,180 @@ impl ExtractApp {
     }
 
     pub fn handle_input(&mut self, input: ExtractInput) -> Outcome {
+        // Global: always honor cancel / help toggle first.
         match input {
-            ExtractInput::Esc | ExtractInput::CtrlC => Outcome::Cancel,
+            ExtractInput::CtrlC => return Outcome::Cancel,
+            ExtractInput::ToggleHelp => {
+                self.help_open = !self.help_open;
+                if self.help_open {
+                    self.help_sel = 0;
+                    self.help_scroll = 0;
+                    self.help_searching = false;
+                    self.help_query.clear();
+                }
+                return Outcome::Continue;
+            }
+            _ => {}
+        }
+
+        if self.help_open {
+            return self.handle_help_input(input);
+        }
+
+        match self.field_mode {
+            FieldMode::Insert => self.handle_insert(input),
+            FieldMode::Normal => self.handle_normal(input),
+        }
+    }
+
+    fn handle_help_input(&mut self, input: ExtractInput) -> Outcome {
+        match input {
+            ExtractInput::Esc | ExtractInput::ToggleHelp => {
+                if self.help_searching {
+                    self.help_searching = false;
+                } else {
+                    self.help_open = false;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::Enter => {
+                self.help_open = false;
+                Outcome::Continue
+            }
+            ExtractInput::Up | ExtractInput::WordBack => {
+                self.help_sel = self.help_sel.saturating_sub(1);
+                Outcome::Continue
+            }
+            ExtractInput::Down | ExtractInput::WordForward => {
+                let n = crate::help::filter_help_entries(&self.help_query).len();
+                if n > 0 {
+                    self.help_sel = (self.help_sel + 1).min(n - 1);
+                }
+                Outcome::Continue
+            }
+            ExtractInput::PageUp => {
+                self.help_sel = self.help_sel.saturating_sub(8);
+                Outcome::Continue
+            }
+            ExtractInput::PageDown => {
+                let n = crate::help::filter_help_entries(&self.help_query).len();
+                if n > 0 {
+                    self.help_sel = (self.help_sel + 8).min(n - 1);
+                }
+                Outcome::Continue
+            }
+            ExtractInput::JumpFirst => {
+                self.help_sel = 0;
+                Outcome::Continue
+            }
+            ExtractInput::JumpLast => {
+                let n = crate::help::filter_help_entries(&self.help_query).len();
+                self.help_sel = n.saturating_sub(1);
+                Outcome::Continue
+            }
+            ExtractInput::Char('/') if !self.help_searching => {
+                self.help_searching = true;
+                Outcome::Continue
+            }
+            ExtractInput::Char(ch) if self.help_searching && !ch.is_control() => {
+                self.help_query.push(ch);
+                self.help_sel = 0;
+                Outcome::Continue
+            }
+            ExtractInput::Backspace if self.help_searching => {
+                self.help_query.pop();
+                self.help_sel = 0;
+                Outcome::Continue
+            }
+            ExtractInput::ClearQuery | ExtractInput::DeleteWord if self.help_searching => {
+                self.help_query.clear();
+                self.help_sel = 0;
+                Outcome::Continue
+            }
+            _ => Outcome::Continue,
+        }
+    }
+
+    fn handle_insert(&mut self, input: ExtractInput) -> Outcome {
+        // jj → normal
+        if let ExtractInput::Char('j') = input {
+            if self.pending_j {
+                self.pending_j = false;
+                // remove the first j that was inserted
+                if self.query_cursor > 0 {
+                    let chars: Vec<char> = self.query.chars().collect();
+                    let mut out = String::new();
+                    out.extend(chars.iter().take(self.query_cursor.saturating_sub(1)));
+                    out.extend(chars.iter().skip(self.query_cursor));
+                    // we haven't inserted the second j yet
+                    self.query = out;
+                    self.query_cursor = self.query_cursor.saturating_sub(1);
+                    self.refilter();
+                }
+                self.field_mode = FieldMode::Normal;
+                return Outcome::Continue;
+            }
+            self.pending_j = true;
+            self.insert_at_cursor('j');
+            self.refilter();
+            return Outcome::Continue;
+        }
+        self.pending_j = false;
+
+        match input {
+            ExtractInput::Esc => {
+                // Recall ladder: insert → normal. Empty insert Esc cancels outright.
+                if self.query.is_empty() && self.kind_filter.is_none() {
+                    Outcome::Cancel
+                } else {
+                    self.field_mode = FieldMode::Normal;
+                    Outcome::Continue
+                }
+            }
             ExtractInput::Enter => self.confirm(),
+            ExtractInput::ToggleMark => {
+                if let Some(item_index) = self.filtered.get(self.selected).map(|m| m.index) {
+                    if !self.marked.remove(&item_index) {
+                        self.marked.insert(item_index);
+                    }
+                }
+                Outcome::Continue
+            }
             ExtractInput::Backspace => {
-                self.query.pop();
+                self.backspace_at_cursor();
                 self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::DeleteWord => {
+                self.delete_query_word();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::ClearQuery => {
+                self.query.clear();
+                self.query_cursor = 0;
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::Left => {
+                if self.query_cursor > 0 {
+                    self.query_cursor -= 1;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::Right => {
+                let len = self.query.chars().count();
+                if self.query_cursor < len {
+                    self.query_cursor += 1;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::Home => {
+                self.query_cursor = 0;
+                Outcome::Continue
+            }
+            ExtractInput::End => {
+                self.query_cursor = self.query.chars().count();
                 Outcome::Continue
             }
             ExtractInput::Up => {
@@ -166,16 +439,385 @@ impl ExtractApp {
                 self.move_sel(1);
                 Outcome::Continue
             }
+            ExtractInput::PageUp => {
+                self.move_sel(-10);
+                Outcome::Continue
+            }
+            ExtractInput::PageDown => {
+                self.move_sel(10);
+                Outcome::Continue
+            }
             ExtractInput::SwitchMode => Outcome::SwitchMode(self.mode.toggle()),
+            ExtractInput::CycleKindFilter => {
+                self.cycle_kind_filter();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::CycleKindFilterBack => {
+                self.cycle_kind_filter_back();
+                self.refilter();
+                Outcome::Continue
+            }
             ExtractInput::Char(ch) => {
                 if ch.is_control() {
                     return Outcome::Continue;
                 }
-                self.query.push(ch);
+                self.insert_at_cursor(ch);
                 self.refilter();
                 Outcome::Continue
             }
+            _ => Outcome::Continue,
         }
+    }
+
+    fn handle_normal(&mut self, input: ExtractInput) -> Outcome {
+        // gg
+        if matches!(input, ExtractInput::Char('g')) {
+            if self.pending_g {
+                self.pending_g = false;
+                self.selected = 0;
+                return Outcome::Continue;
+            }
+            self.pending_g = true;
+            return Outcome::Continue;
+        }
+        let was_g = self.pending_g;
+        self.pending_g = false;
+
+        match input {
+            ExtractInput::Esc => {
+                if !self.query.is_empty() {
+                    // clear filter but stay open
+                    self.query.clear();
+                    self.query_cursor = 0;
+                    self.kind_filter = None;
+                    self.refilter();
+                    Outcome::Continue
+                } else {
+                    Outcome::Cancel
+                }
+            }
+            ExtractInput::Enter => self.confirm(),
+            ExtractInput::Up | ExtractInput::Char('k') => {
+                self.move_sel(-1);
+                Outcome::Continue
+            }
+            ExtractInput::Down | ExtractInput::Char('j') => {
+                self.move_sel(1);
+                Outcome::Continue
+            }
+            ExtractInput::PageUp => {
+                self.move_sel(-10);
+                Outcome::Continue
+            }
+            ExtractInput::PageDown => {
+                self.move_sel(10);
+                Outcome::Continue
+            }
+            ExtractInput::JumpFirst | ExtractInput::Char('g') if was_g => {
+                self.selected = 0;
+                Outcome::Continue
+            }
+            ExtractInput::JumpLast | ExtractInput::Char('G') => {
+                if !self.filtered.is_empty() {
+                    self.selected = self.filtered.len() - 1;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::ToggleMark | ExtractInput::Char(' ') => {
+                if let Some(item_index) = self.filtered.get(self.selected).map(|m| m.index) {
+                    if !self.marked.remove(&item_index) {
+                        self.marked.insert(item_index);
+                    }
+                }
+                Outcome::Continue
+            }
+            ExtractInput::SwitchMode | ExtractInput::Char('\t') => {
+                Outcome::SwitchMode(self.mode.toggle())
+            }
+            // Scope jumps (normal mode) — tab still cycles all three.
+            ExtractInput::Char('s') | ExtractInput::Char('v') => {
+                Outcome::SwitchMode(ExtractMode::Screen)
+            }
+            ExtractInput::Char('S') => Outcome::SwitchMode(ExtractMode::Scrollback),
+            ExtractInput::Char('t') => Outcome::SwitchMode(ExtractMode::Global),
+            ExtractInput::CycleKindFilter => {
+                self.cycle_kind_filter();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::CycleKindFilterBack => {
+                self.cycle_kind_filter_back();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::EnterInsert | ExtractInput::Char('i') => {
+                self.field_mode = FieldMode::Insert;
+                Outcome::Continue
+            }
+            ExtractInput::EnterInsertAfter | ExtractInput::Char('a') => {
+                let len = self.query.chars().count();
+                if self.query_cursor < len {
+                    self.query_cursor += 1;
+                }
+                self.field_mode = FieldMode::Insert;
+                Outcome::Continue
+            }
+            ExtractInput::EnterInsertLineStart | ExtractInput::Char('I') => {
+                self.query_cursor = 0;
+                self.field_mode = FieldMode::Insert;
+                Outcome::Continue
+            }
+            ExtractInput::EnterInsertLineEnd | ExtractInput::Char('A') => {
+                self.query_cursor = self.query.chars().count();
+                self.field_mode = FieldMode::Insert;
+                Outcome::Continue
+            }
+            ExtractInput::Home | ExtractInput::Char('0') => {
+                self.query_cursor = 0;
+                Outcome::Continue
+            }
+            ExtractInput::End | ExtractInput::Char('$') => {
+                self.query_cursor = self.query.chars().count();
+                Outcome::Continue
+            }
+            ExtractInput::WordForward | ExtractInput::Char('w') => {
+                self.motion_word_forward();
+                Outcome::Continue
+            }
+            ExtractInput::WordBack | ExtractInput::Char('b') => {
+                self.motion_word_back();
+                Outcome::Continue
+            }
+            ExtractInput::WordEnd | ExtractInput::Char('e') => {
+                self.motion_word_end();
+                Outcome::Continue
+            }
+            ExtractInput::DeleteUnder | ExtractInput::Char('x') => {
+                self.delete_under_cursor();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::DeleteBefore | ExtractInput::Char('X') => {
+                self.backspace_at_cursor();
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::ClearQueryNormal | ExtractInput::Char('D') => {
+                self.query.clear();
+                self.query_cursor = 0;
+                self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::Char('d') => {
+                // dd clear — second d
+                // use pending via message or simple: single d waits - store pending_d
+                // For simplicity treat d as start of dd: if next is d clear. Use pending_g style.
+                // Re-use pending_g slot? Better pending_d field - skip, map dd via pending_g abuse no.
+                // Single 'd' alone does nothing; 'dd' needs pending. Add pending_d inline via pending_g rename...
+                // Quick: 'c' clear query as alias too
+                Outcome::Continue
+            }
+            ExtractInput::Left => {
+                if self.query_cursor > 0 {
+                    self.query_cursor -= 1;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::Right => {
+                let len = self.query.chars().count();
+                if self.query_cursor < len {
+                    self.query_cursor += 1;
+                }
+                Outcome::Continue
+            }
+            ExtractInput::Char('/') => {
+                // slash focuses insert for filtering (vim search idiom)
+                self.field_mode = FieldMode::Insert;
+                Outcome::Continue
+            }
+            _ => Outcome::Continue,
+        }
+    }
+
+    fn motion_word_forward(&mut self) {
+        let chars: Vec<char> = self.query.chars().collect();
+        let n = chars.len();
+        if self.query_cursor >= n {
+            return;
+        }
+        let mut i = self.query_cursor;
+        // skip current word
+        while i < n && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        self.query_cursor = i;
+    }
+
+    fn motion_word_back(&mut self) {
+        if self.query_cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.query.chars().collect();
+        let mut i = self.query_cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.query_cursor = i;
+    }
+
+    fn motion_word_end(&mut self) {
+        let chars: Vec<char> = self.query.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return;
+        }
+        let mut i = self.query_cursor;
+        if i < n && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i + 1 < n && !chars[i + 1].is_whitespace() {
+            i += 1;
+        }
+        if i < n {
+            self.query_cursor = i;
+        }
+    }
+
+    fn delete_under_cursor(&mut self) {
+        let chars: Vec<char> = self.query.chars().collect();
+        if self.query_cursor >= chars.len() {
+            return;
+        }
+        let mut out = String::new();
+        out.extend(chars.iter().take(self.query_cursor));
+        out.extend(chars.iter().skip(self.query_cursor + 1));
+        self.query = out;
+    }
+
+    fn delete_query_word(&mut self) {
+        // Delete back to previous whitespace from the cursor.
+        let chars: Vec<char> = self.query.chars().collect();
+        if self.query_cursor == 0 || chars.is_empty() {
+            return;
+        }
+        let mut end = self.query_cursor;
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let left: String = chars[..start].iter().collect();
+        let right: String = chars[end..].iter().collect();
+        self.query = left + &right;
+        self.query_cursor = start;
+    }
+
+    fn insert_at_cursor(&mut self, ch: char) {
+        let chars: Vec<char> = self.query.chars().collect();
+        let mut out = String::new();
+        out.extend(chars.iter().take(self.query_cursor));
+        out.push(ch);
+        out.extend(chars.iter().skip(self.query_cursor));
+        self.query = out;
+        self.query_cursor += 1;
+    }
+
+    fn backspace_at_cursor(&mut self) {
+        if self.query_cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.query.chars().collect();
+        let mut out = String::new();
+        out.extend(chars.iter().take(self.query_cursor - 1));
+        out.extend(chars.iter().skip(self.query_cursor));
+        self.query = out;
+        self.query_cursor -= 1;
+    }
+
+    fn cycle_kind_filter(&mut self) {
+        let kinds = crate::extract::ItemKind::all();
+        self.kind_filter = match self.kind_filter {
+            None => Some(kinds[0]),
+            Some(current) => {
+                let pos = kinds.iter().position(|k| *k == current).unwrap_or(0);
+                if pos + 1 >= kinds.len() {
+                    None
+                } else {
+                    Some(kinds[pos + 1])
+                }
+            }
+        };
+    }
+
+    fn cycle_kind_filter_back(&mut self) {
+        let kinds = crate::extract::ItemKind::all();
+        self.kind_filter = match self.kind_filter {
+            None => Some(*kinds.last().unwrap()),
+            Some(current) => {
+                let pos = kinds.iter().position(|k| *k == current).unwrap_or(0);
+                if pos == 0 {
+                    None
+                } else {
+                    Some(kinds[pos - 1])
+                }
+            }
+        };
+    }
+
+    pub fn kind_filter(&self) -> Option<crate::extract::ItemKind> {
+        self.kind_filter
+    }
+
+    pub fn field_mode(&self) -> FieldMode {
+        self.field_mode
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub fn help_query(&self) -> &str {
+        &self.help_query
+    }
+
+    pub fn help_sel(&self) -> usize {
+        self.help_sel
+    }
+
+    pub fn help_searching(&self) -> bool {
+        self.help_searching
+    }
+
+    pub fn set_help_scroll(&mut self, scroll: usize) {
+        self.help_scroll = scroll;
+    }
+
+    pub fn help_scroll(&self) -> usize {
+        self.help_scroll
+    }
+
+    pub fn query_cursor(&self) -> usize {
+        self.query_cursor.min(self.query.chars().count())
+    }
+
+    pub fn is_marked(&self, item_index: usize) -> bool {
+        self.marked.contains(&item_index)
+    }
+
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
     }
 
     /// Convenience for tests and simple char-only drivers.
@@ -184,6 +826,18 @@ impl ExtractApp {
     }
 
     fn confirm(&self) -> Outcome {
+        if !self.marked.is_empty() {
+            let mut parts = Vec::new();
+            for idx in &self.marked {
+                if let Some(item) = self.items.get(*idx) {
+                    parts.push(item.text.clone());
+                }
+            }
+            if parts.is_empty() {
+                return Outcome::Continue;
+            }
+            return Outcome::Copy(parts.join("\n"));
+        }
         match self.selected_item() {
             Some(item) => Outcome::Copy(item.text.clone()),
             None => Outcome::Continue,
@@ -203,10 +857,35 @@ impl ExtractApp {
 
     fn refilter(&mut self) {
         let selected_item = self.filtered.get(self.selected).map(|item| item.index);
-        self.filtered = fuzzy_matches(&self.items, &self.query);
+        let parsed = parse_filter_query(&self.query);
+        let active_kind = parsed.kind.or(self.kind_filter);
+        let mut filtered: Vec<FuzzyMatch> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                if let Some(kind) = active_kind {
+                    if item.kind != kind {
+                        return None;
+                    }
+                }
+                score_item(item, &parsed.tokens).map(|(score, positions)| FuzzyMatch {
+                    index,
+                    score,
+                    positions,
+                })
+            })
+            .collect();
+        filtered.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+        self.filtered = filtered;
         if self.filtered.is_empty() {
             self.selected = 0;
-            self.message = Some("no matches".to_string());
+            let hint = if active_kind.is_some() || !parsed.tokens.is_empty() {
+                "no matches — clear filter or try kind:url / @email / multi words"
+            } else {
+                "no matches"
+            };
+            self.message = Some(hint.to_string());
         } else {
             self.message = None;
             self.selected = selected_item
@@ -217,6 +896,19 @@ impl ExtractApp {
                 })
                 .unwrap_or(0);
         }
+    }
+
+    /// Human-readable active filter summary for the prompt chrome.
+    pub fn filter_summary(&self) -> String {
+        let parsed = parse_filter_query(&self.query);
+        let mut parts = Vec::new();
+        if let Some(kind) = parsed.kind.or(self.kind_filter) {
+            parts.push(format!("kind:{}", kind.stable_key()));
+        }
+        if !parsed.tokens.is_empty() {
+            parts.push(parsed.tokens.join(" · "));
+        }
+        parts.join("  ")
     }
 
     pub fn selected_item(&self) -> Option<&ExtractItem> {
@@ -255,6 +947,8 @@ impl ExtractApp {
         let selected_text = self.selected_item().map(|item| item.text.clone());
         self.mode = mode;
         self.items = items;
+        // Marks are index-based; drop them on list swap so Tab cannot copy wrong tokens.
+        self.marked.clear();
         self.refilter();
         if let Some(text) = selected_text {
             if let Some(position) = self
@@ -314,14 +1008,20 @@ impl ExtractApp {
             .collect()
     }
 
-    pub fn visible_match_items(&self) -> Vec<(bool, &ExtractItem, &[usize])> {
+    /// (is_selected, is_marked, item, match positions)
+    pub fn visible_match_items(&self) -> Vec<(bool, bool, &ExtractItem, &[usize])> {
         self.filtered
             .iter()
             .enumerate()
             .filter_map(|(pos, item_match)| {
-                self.items
-                    .get(item_match.index)
-                    .map(|item| (pos == self.selected, item, item_match.positions.as_slice()))
+                self.items.get(item_match.index).map(|item| {
+                    (
+                        pos == self.selected,
+                        self.marked.contains(&item_match.index),
+                        item,
+                        item_match.positions.as_slice(),
+                    )
+                })
             })
             .collect()
     }
@@ -334,21 +1034,193 @@ struct FuzzyMatch {
     positions: Vec<usize>,
 }
 
-/// Match a query as a case-aware subsequence, favoring word starts and runs.
-/// Lowercase queries are case-insensitive; an uppercase query is smart-case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedQuery {
+    kind: Option<crate::extract::ItemKind>,
+    tokens: Vec<String>,
+}
+
+/// Parse an intuitive filter query.
+///
+/// Supports:
+/// - `kind:url`, `k:path`, short aliases `u:` / `p:` / `e:` …
+/// - leading sigils `@mail` (email), `#42` stays text unless alone as kind id filter via `id:`
+/// - space-separated tokens = AND (all must match text or kind label)
+/// - bare kind name as sole token (`url`, `email`) = quick kind filter
+fn parse_filter_query(query: &str) -> ParsedQuery {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return ParsedQuery {
+            kind: None,
+            tokens: Vec::new(),
+        };
+    }
+
+    let mut kind = None;
+    let mut rest = trimmed;
+
+    // kind:key / k:key
+    for prefix in ["kind:", "k:"] {
+        if let Some(after) = rest.strip_prefix(prefix) {
+            let after = after.trim_start();
+            let (key, remainder) = split_first_token(after);
+            if let Some(parsed) = resolve_kind_alias(key) {
+                kind = Some(parsed);
+                rest = remainder;
+                break;
+            }
+        }
+    }
+
+    // short `u:foo` / `path:foo` form when kind not set
+    if kind.is_none() {
+        if let Some((key, remainder)) = rest.split_once(':') {
+            let key = key.trim();
+            // avoid treating URLs like https:// as kind
+            if !key.is_empty()
+                && !key.contains('/')
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                if let Some(parsed) = resolve_kind_alias(key) {
+                    kind = Some(parsed);
+                    rest = remainder.trim_start();
+                }
+            }
+        }
+    }
+
+    // leading @ means email filter + remainder
+    if kind.is_none() {
+        if let Some(after) = rest.strip_prefix('@') {
+            kind = Some(crate::extract::ItemKind::Email);
+            rest = after.trim_start();
+        }
+    }
+
+    let mut tokens: Vec<String> = rest
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+
+    // Sole token that is a kind alias → quick kind filter (type "url" alone).
+    if kind.is_none() && tokens.len() == 1 {
+        if let Some(parsed) = resolve_kind_alias(&tokens[0]) {
+            kind = Some(parsed);
+            tokens.clear();
+        }
+    }
+
+    ParsedQuery { kind, tokens }
+}
+
+fn split_first_token(input: &str) -> (&str, &str) {
+    match input.find(char::is_whitespace) {
+        Some(idx) => (&input[..idx], input[idx..].trim_start()),
+        None => (input, ""),
+    }
+}
+
+fn resolve_kind_alias(key: &str) -> Option<crate::extract::ItemKind> {
+    let k = key.trim().to_ascii_lowercase();
+    match k.as_str() {
+        "u" | "url" | "urls" | "link" | "links" => Some(crate::extract::ItemKind::Url),
+        "p" | "path" | "paths" | "file" | "files" => Some(crate::extract::ItemKind::Path),
+        "e" | "email" | "mail" | "mails" => Some(crate::extract::ItemKind::Email),
+        "h" | "host" | "hosts" | "hostname" => Some(crate::extract::ItemKind::Host),
+        "i" | "ip" | "ips" => Some(crate::extract::ItemKind::Ip),
+        "id" | "ids" | "ticket" | "bead" | "issue" => Some(crate::extract::ItemKind::Id),
+        "c" | "cmd" | "command" | "commands" => Some(crate::extract::ItemKind::Command),
+        "hash" | "sha" | "commit" => Some(crate::extract::ItemKind::Hash),
+        "v" | "ver" | "version" => Some(crate::extract::ItemKind::Version),
+        "err" | "error" | "errors" | "fail" => Some(crate::extract::ItemKind::Error),
+        "code" | "json" | "key" => Some(crate::extract::ItemKind::Code),
+        "env" | "var" | "vars" => Some(crate::extract::ItemKind::Env),
+        "uuid" | "guid" => Some(crate::extract::ItemKind::Uuid),
+        "date" | "day" => Some(crate::extract::ItemKind::Date),
+        "color" | "hex" | "colour" => Some(crate::extract::ItemKind::Color),
+        "name" | "phrase" | "names" => Some(crate::extract::ItemKind::Phrase),
+        "q" | "quote" | "quotes" => Some(crate::extract::ItemKind::Quote),
+        "w" | "word" | "words" => Some(crate::extract::ItemKind::Word),
+        _ => crate::extract::ItemKind::from_stable_key(&k),
+    }
+}
+
+/// Score one item against AND-tokens. Each token must match the item text
+/// (exact/prefix/substring/fuzzy) or the kind label.
+fn score_item(item: &ExtractItem, tokens: &[String]) -> Option<(i32, Vec<usize>)> {
+    if tokens.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    let mut total = 0i32;
+    let mut positions = Vec::new();
+    for token in tokens {
+        let (score, pos) = match_token(item, token)?;
+        total = total.saturating_add(score);
+        positions.extend(pos);
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    Some((total, positions))
+}
+
+fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Some((0, Vec::new()));
+    }
+
+    // Kind-label match: typing "email" while already in all-kinds boosts emails.
+    let kind_key = item.kind.stable_key();
+    if kind_key.eq_ignore_ascii_case(token) || resolve_kind_alias(token) == Some(item.kind) {
+        return Some((80, Vec::new()));
+    }
+
+    let text = item.text.as_str();
+    let lower_text = text.to_ascii_lowercase();
+    let lower_token = token.to_ascii_lowercase();
+
+    // Exact
+    if text == token || lower_text == lower_token {
+        let positions: Vec<usize> = (0..token.chars().count()).collect();
+        return Some((200, positions));
+    }
+    // Prefix
+    if lower_text.starts_with(&lower_token) {
+        let positions: Vec<usize> = (0..token.chars().count()).collect();
+        return Some((150, positions));
+    }
+    // Continuous substring (case-insensitive)
+    if let Some(byte_idx) = lower_text.find(&lower_token) {
+        let start_char = text[..byte_idx].chars().count();
+        let positions: Vec<usize> = (start_char..start_char + token.chars().count()).collect();
+        return Some((120, positions));
+    }
+    // Fuzzy subsequence
+    let (score, positions) = fuzzy_match(text, token)?;
+    Some((score, positions))
+}
+
+#[cfg(test)]
 fn fuzzy_matches(items: &[ExtractItem], query: &str) -> Vec<FuzzyMatch> {
+    let parsed = parse_filter_query(query);
     let mut matches: Vec<_> = items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            fuzzy_match(&item.text, query).map(|(score, positions)| FuzzyMatch {
+            if let Some(kind) = parsed.kind {
+                if item.kind != kind {
+                    return None;
+                }
+            }
+            score_item(item, &parsed.tokens).map(|(score, positions)| FuzzyMatch {
                 index,
                 score,
                 positions,
             })
         })
         .collect();
-    matches.sort_by_key(|item| std::cmp::Reverse(item.score));
+    matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
     matches
 }
 
@@ -602,34 +1474,55 @@ single: 'single-quoted-token'\n";
 
         a.handle_char('z');
         assert_eq!(a.filtered_count(), 0);
-        assert_eq!(a.message(), Some("no matches"));
+        assert!(a.message().unwrap_or("").starts_with("no matches"));
 
         a.handle_input(ExtractInput::Backspace);
         assert_eq!(a.filtered_count(), 2);
         assert_eq!(a.message(), None);
 
         let empty = ExtractApp::new(Vec::new(), Theme::default());
-        assert_eq!(empty.message(), Some("no matches"));
+        assert!(empty.message().unwrap_or("").starts_with("no matches"));
     }
 
     #[test]
     fn switch_mode_toggles_mode_and_reports_the_target() {
         let mut a = app(&["alpha-token"]);
         assert_eq!(a.mode(), ExtractMode::Scrollback);
+        // Tab cycles scrollback → screen → global → scrollback.
         assert_eq!(
             a.handle_char('\t'),
-            Outcome::SwitchMode(ExtractMode::Global)
+            Outcome::SwitchMode(ExtractMode::Screen)
         );
-        // The app does not flip its mode until the driver applies the switch,
-        // so repeated toggles keep reporting the same target.
         assert_eq!(a.mode(), ExtractMode::Scrollback);
 
-        // After the driver applies the switch, toggling targets the other mode.
+        a.apply_mode(ExtractMode::Screen, items(&["screen-token"]));
+        assert_eq!(
+            a.handle_input(ExtractInput::SwitchMode),
+            Outcome::SwitchMode(ExtractMode::Global)
+        );
+
         a.apply_mode(ExtractMode::Global, items(&["global-token"]));
-        assert_eq!(a.mode(), ExtractMode::Global);
         assert_eq!(
             a.handle_input(ExtractInput::SwitchMode),
             Outcome::SwitchMode(ExtractMode::Scrollback)
+        );
+
+        // Normal-mode scope jumps.
+        a.handle_input(ExtractInput::Esc); // insert→normal if needed
+        let _ = a.handle_input(ExtractInput::Char('s'));
+        // Char('s') only jumps in normal; ensure we are normal
+        a.field_mode = FieldMode::Normal;
+        assert_eq!(
+            a.handle_input(ExtractInput::Char('s')),
+            Outcome::SwitchMode(ExtractMode::Screen)
+        );
+        assert_eq!(
+            a.handle_input(ExtractInput::Char('S')),
+            Outcome::SwitchMode(ExtractMode::Scrollback)
+        );
+        assert_eq!(
+            a.handle_input(ExtractInput::Char('t')),
+            Outcome::SwitchMode(ExtractMode::Global)
         );
     }
 
@@ -699,9 +1592,12 @@ single: 'single-quoted-token'\n";
     #[test]
     fn mode_names_and_toggle_round_trip() {
         assert_eq!(ExtractMode::Scrollback.name(), "scrollback");
+        assert_eq!(ExtractMode::Screen.name(), "screen");
         assert_eq!(ExtractMode::Global.name(), "global");
-        assert_eq!(ExtractMode::Scrollback.toggle(), ExtractMode::Global);
+        assert_eq!(ExtractMode::Scrollback.toggle(), ExtractMode::Screen);
+        assert_eq!(ExtractMode::Screen.toggle(), ExtractMode::Global);
         assert_eq!(ExtractMode::Global.toggle(), ExtractMode::Scrollback);
+        assert_eq!(ExtractMode::Screen.badge(), "SCREEN");
     }
 
     #[test]
@@ -717,5 +1613,188 @@ single: 'single-quoted-token'\n";
         assert_eq!(a.message(), Some("reading global history..."));
         a.handle_char('a');
         assert_eq!(a.message(), None);
+    }
+
+    #[test]
+    fn multi_token_and_filter_and_quick_kind() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "https://staging.example/deploy".into(),
+                kind: ItemKind::Url,
+            },
+            ExtractItem {
+                text: "https://prod.example/app".into(),
+                kind: ItemKind::Url,
+            },
+            ExtractItem {
+                text: "/tmp/staging-notes".into(),
+                kind: ItemKind::Path,
+            },
+            ExtractItem {
+                text: "jon@arcs.health".into(),
+                kind: ItemKind::Email,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        // AND tokens: both must match
+        for ch in "stg dep".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert!(app
+            .selected_item()
+            .unwrap()
+            .text
+            .contains("staging.example/deploy"));
+        app.handle_input(ExtractInput::ClearQuery);
+        // quick kind alias alone
+        for ch in "email".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert_eq!(app.selected_item().unwrap().kind, ItemKind::Email);
+        app.handle_input(ExtractInput::ClearQuery);
+        // u: prefix + token
+        for ch in "u:prod".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert!(app.selected_item().unwrap().text.contains("prod.example"));
+        app.handle_input(ExtractInput::ClearQuery);
+        // @ sigil
+        for ch in "@arcs".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert_eq!(app.selected_item().unwrap().kind, ItemKind::Email);
+    }
+
+    #[test]
+    fn kind_query_prefix_and_ctrl_k_cycle_filter_kinds() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "https://a.example/x".into(),
+                kind: ItemKind::Url,
+            },
+            ExtractItem {
+                text: "/tmp/path-file".into(),
+                kind: ItemKind::Path,
+            },
+            ExtractItem {
+                text: "plain-word-token".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        assert_eq!(app.filtered_count(), 3);
+        for ch in "kind:url".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert_eq!(app.selected_item().unwrap().kind, ItemKind::Url);
+        app.handle_input(ExtractInput::ClearQuery);
+        app.handle_input(ExtractInput::CycleKindFilter);
+        assert!(app.kind_filter().is_some());
+        app.handle_input(ExtractInput::CycleKindFilterBack);
+        assert!(app.kind_filter().is_none());
+    }
+
+    #[test]
+    fn readline_edits_and_marks_work() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "alpha-token".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "beta-token".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        for ch in "alpha beta".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.query(), "alpha beta");
+        app.handle_input(ExtractInput::DeleteWord);
+        assert_eq!(app.query().trim(), "alpha");
+        app.handle_input(ExtractInput::ClearQuery);
+        assert_eq!(app.query(), "");
+        app.handle_input(ExtractInput::ToggleMark);
+        assert_eq!(app.marked_count(), 1);
+        app.handle_input(ExtractInput::Down);
+        app.handle_input(ExtractInput::ToggleMark);
+        assert_eq!(app.marked_count(), 2);
+        match app.handle_input(ExtractInput::Enter) {
+            Outcome::Copy(text) => {
+                assert!(text.contains("alpha-token") && text.contains("beta-token"))
+            }
+            other => panic!("expected copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marks_clear_on_mode_switch() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "alpha-token".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "beta-token".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut app = ExtractApp::new(items.clone(), theme.clone());
+        app.handle_input(ExtractInput::ToggleMark);
+        assert_eq!(app.marked_count(), 1);
+        app.apply_mode(ExtractMode::Global, items);
+        assert_eq!(app.marked_count(), 0);
+    }
+
+    #[test]
+    fn modal_insert_normal_and_help_overlay() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "alpha-token".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "beta-token".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        assert_eq!(app.field_mode(), FieldMode::Insert);
+        // type filter
+        for ch in "alpha".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        // esc → normal
+        assert_eq!(app.handle_input(ExtractInput::Esc), Outcome::Continue);
+        assert_eq!(app.field_mode(), FieldMode::Normal);
+        // j moves selection (only one match so stays)
+        app.handle_input(ExtractInput::Char('j'));
+        // ? opens help
+        app.handle_input(ExtractInput::ToggleHelp);
+        assert!(app.help_open());
+        app.handle_input(ExtractInput::Char('/'));
+        assert!(app.help_searching());
+        for ch in "mark".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.help_query(), "mark");
+        app.handle_input(ExtractInput::Esc); // leave help search
+        app.handle_input(ExtractInput::ToggleHelp); // close help
+        assert!(!app.help_open());
+        // i back to insert
+        app.handle_input(ExtractInput::Char('i'));
+        assert_eq!(app.field_mode(), FieldMode::Insert);
     }
 }

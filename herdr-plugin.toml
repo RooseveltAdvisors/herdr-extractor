@@ -11,13 +11,13 @@ command = ["cargo", "build", "--release", "--locked"]
 [[actions]]
 id = "extract"
 title = "Extract scrollback tokens"
-description = "List URLs, paths, quotes, and words from pane scrollback and copy one"
+description = "List URLs, paths, emails, hosts, phrases, and other entities from pane scrollback and copy one"
 command = ["./scripts/open-extractor"]
 
 [[actions]]
 id = "extract_transcript"
 title = "Extract session transcript tokens"
-description = "List URLs, paths, quotes, and words from the pane's full retained session transcript and copy one"
+description = "List URLs, paths, emails, hosts, phrases, and other entities from the pane's full retained session transcript and copy one"
 command = ["./scripts/open-extractor", "extract-transcript"]
 
 [[panes]]
