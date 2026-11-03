@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use herdr_extractor::clipboard::copy_to_clipboard;
-use herdr_extractor::config::{load_extract_settings, NlpSettings};
+use herdr_extractor::config::{load_extract_settings, NlpEngine, NlpSettings};
 use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode, ExtractionEngine};
 use herdr_extractor::herdr_client::{
     context_focused_pane_id, PaneGeometry, PaneText, SocketClient,
@@ -155,26 +155,34 @@ fn extract_items(
     nlp: &NlpSettings,
     config_dir: Option<&Path>,
 ) -> (Vec<herdr_extractor::extract::ExtractItem>, ExtractionEngine) {
-    let regex_items = herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
+    // Pattern filters + built-in entity resolver (emails, hosts, phrases, ...).
+    let base_items = herdr_extractor::extract::extract_items_from_visible_text_with_wrap_width(
         &load.text.text,
         load.wrap_width,
     );
-    if !nlp.enabled {
-        return (regex_items, ExtractionEngine::Regex);
+    let want_sidecar = nlp.enabled && matches!(nlp.engine, NlpEngine::Sidecar | NlpEngine::Auto);
+    if !want_sidecar {
+        return (base_items, ExtractionEngine::Regex);
     }
     let Some(socket_path) = nlp_socket_path(nlp, config_dir) else {
-        log_state("nlp_fallback: enabled but no sidecar socket configured");
-        return (regex_items, ExtractionEngine::Regex);
+        if nlp.engine == NlpEngine::Sidecar {
+            log_state("nlp_fallback: sidecar enabled but no socket configured");
+        }
+        return (base_items, ExtractionEngine::Regex);
     };
+    // Auto only dials when the socket path already exists on disk.
+    if nlp.engine == NlpEngine::Auto && !socket_path.exists() {
+        return (base_items, ExtractionEngine::Regex);
+    }
     match herdr_extractor::nlp::request_candidates(&socket_path, &load.text.text) {
         Ok(candidates) => {
             log_state(&format!(
-                "nlp_engine=active candidates={}",
+                "nlp_engine=sidecar candidates={}",
                 candidates.len()
             ));
             (
                 herdr_extractor::extract::merge_nlp_candidates(
-                    regex_items,
+                    base_items,
                     &candidates,
                     nlp.confidence_threshold,
                 ),
@@ -183,7 +191,7 @@ fn extract_items(
         }
         Err(error) => {
             log_state(&format!("nlp_fallback: {error:#}"));
-            (regex_items, ExtractionEngine::Regex)
+            (base_items, ExtractionEngine::Regex)
         }
     }
 }
@@ -214,10 +222,8 @@ struct ModeLoad {
 
 /// Read the pane text for a data mode.
 ///
-/// Scrollback mode reads the retained scrollback (with the viewport-width
-/// fallback unwrap). Global mode prefers the pane's full saved session
-/// history and falls back to the server-capped `recent_unwrapped` transcript,
-/// never degrading to viewport-shaped sources.
+/// Scrollback = retained scrollback. Screen = current viewport only.
+/// Global = full session history (never degrades to viewport-shaped sources).
 fn load_mode(
     client: &mut SocketClient,
     pane_id: &str,
@@ -238,6 +244,25 @@ fn load_mode(
                     }
                 }
             };
+            Ok(ModeLoad {
+                text,
+                wrap_width,
+                no_retained_history: false,
+            })
+        }
+        ExtractMode::Screen => {
+            let text = client.read_screen_pane(pane_id)?;
+            let wrap_width = match client.visible_pane_geometry(pane_id) {
+                Ok(geometry) => Some(visible_wrap_width(usize::from(geometry.width))),
+                Err(error) => {
+                    log_state(&format!("pane_width_unavailable: {error:#}"));
+                    None
+                }
+            };
+            log_state(&format!(
+                "screen_mode source=visible lines={}",
+                text.text.lines().count()
+            ));
             Ok(ModeLoad {
                 text,
                 wrap_width,
@@ -312,6 +337,15 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
             KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::SwitchMode),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
+            // fzf-style readline edits + extrakto-style kind cycle
+            KeyCode::Char('w') | KeyCode::Char('W') => Some(ExtractInput::DeleteWord),
+            KeyCode::Char('u') | KeyCode::Char('U') => Some(ExtractInput::ClearQuery),
+            KeyCode::Char('k') | KeyCode::Char('K') => Some(ExtractInput::CycleKindFilter),
+            KeyCode::Char('j') | KeyCode::Char('J') => Some(ExtractInput::CycleKindFilterBack),
+            KeyCode::Char('a') | KeyCode::Char('A') => Some(ExtractInput::Home),
+            KeyCode::Char('e') | KeyCode::Char('E') => Some(ExtractInput::End),
+            KeyCode::Left => Some(ExtractInput::Left),
+            KeyCode::Right => Some(ExtractInput::Right),
             _ => None,
         };
     }
@@ -321,7 +355,15 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
         KeyCode::Enter => Some(ExtractInput::Enter),
         KeyCode::Up => Some(ExtractInput::Up),
         KeyCode::Down => Some(ExtractInput::Down),
+        KeyCode::PageUp => Some(ExtractInput::PageUp),
+        KeyCode::PageDown => Some(ExtractInput::PageDown),
+        KeyCode::Home => Some(ExtractInput::Home),
+        KeyCode::End => Some(ExtractInput::End),
+        KeyCode::Left => Some(ExtractInput::Left),
+        KeyCode::Right => Some(ExtractInput::Right),
         KeyCode::Tab => Some(ExtractInput::SwitchMode),
+        KeyCode::Char(' ') => Some(ExtractInput::Char(' ')),
+        KeyCode::Char('?') => Some(ExtractInput::ToggleHelp),
         KeyCode::Char(character) => Some(ExtractInput::Char(character)),
         _ => None,
     }

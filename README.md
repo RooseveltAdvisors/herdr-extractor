@@ -90,11 +90,15 @@ live mode re-extraction directly.
    after returning to normal mode. Older Herdr versions fall back to `recent`, then `visible`, only
    when a source is unsupported.
 2. Herdr supplies logical lines for `recent_unwrapped`; fallback sources use the pane layout width.
-3. A bounded extrakto-parity set collects URLs, paths, double/single quotes, and words of at least
-   five characters. It also recognizes commands, hashes, versions, error lines, and backtick/JSON
-   code. ANSI/SGR residue, box fragments, ratios, percentages, punctuation tails, and wrapped
-   slivers are discarded. Canonicalized duplicates collapse to one item, ranked by recency,
-   semantic usefulness, length, and character variety.
+3. A multi-pass extractor collects copy-eligible tokens:
+   - pattern filters: URLs (including markdown links), paths, emails, IPv4/IPv6, UUIDs, hostnames,
+     ticket/bead/issue ids, env vars, double/single quotes, commands, hashes, versions, error
+     lines, backtick/JSON code, title-case phrases, and words of at least five characters
+   - built-in entity resolver (`src/entity.rs`): pattern NER plus multi-token phrase chunking and
+     a small linear scorer with baked-in weights for entity-name worthiness and kind resolution
+   ANSI/SGR residue, box fragments, ratios, percentages, punctuation tails, and wrapped slivers
+   are discarded. Canonicalized duplicates collapse to one item, ranked by recency, semantic
+   usefulness, length, and character variety.
 4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
    scrollback and global (full session history) modes. `Enter` copies exactly one item
    through OSC 52. `Esc` or `Ctrl-C` cancels.
@@ -169,21 +173,34 @@ copy_toast = true
 icons = false
 
 [style]
-selected_match_fg = "#000000"
-selected_match_bg = "#df8e1d"
-status_bg = "gray"
-url_fg = "gray"
-path_fg = "cyan"
-error_fg = "gray"
-command_fg = "gray"
-hash_fg = "gray"
-version_fg = "gray"
-quote_fg = "dark-gray"
-code_fg = "gray"
+# Catppuccin Mocha-inspired defaults (hex). Override any key.
+selected_match_fg = "#11111b"
+selected_match_bg = "#fab387"
+status_fg = "#cdd6f4"
+status_bg = "#313244"
+match_fg = "#fab387"
+url_fg = "#89b4fa"
+path_fg = "#a6e3a1"
+error_fg = "#f38ba8"
+command_fg = "#fab387"
+hash_fg = "#94e2d5"
+version_fg = "#f9e2af"
+quote_fg = "#7f849c"
+code_fg = "#94e2d5"
+email_fg = "#cba6f7"
+ip_fg = "#74c7ec"
+uuid_fg = "#b4befe"
+host_fg = "#89dceb"
+id_fg = "#f9e2af"
+env_fg = "#a6e3a1"
+phrase_fg = "#f5c2e7"
+date_fg = "#74c7ec"
+color_fg = "#cba6f7"
 
 [nlp]
-# Optional, off by default. Regex extraction remains the instant fallback.
+# Optional external sidecar. Built-in entity resolution always runs in-process.
 enabled = false
+engine = "sidecar"   # off | sidecar | auto
 socket_path = "/run/user/1000/herdr-extractor-nlp.sock"
 confidence_threshold = 0.75
 ```
@@ -192,14 +209,29 @@ Named colors and `#RRGGBB` are supported. The existing style settings remain val
 foreground settings only affect unselected rows. `icons` may also be set through the environment
 with `HERDR_EXTRACTOR_ASCII_ICONS=1`.
 
+### Built-in entity resolver
+
+Every extraction runs a compact in-process entity model (`src/entity.rs`) with no download and no
+extra process:
+
+- pattern NER for `email`, `ip`, `uuid`, `host`, `id`, `env`, and bare `www.` URLs
+- multi-token phrase chunking for title-case names (`Jon Roosevelt`, `Covenant Clinics`) and
+  connector phrases (`Board of Directors`)
+- a linear feature scorer with baked-in weights for phrase worthiness and kind resolution when
+  several classes compete
+
+Stable kind keys shown in the picker: `url`, `path`, `quote`, `squote`, `word`, `command`, `hash`,
+`version`, `error`, `code`, `email`, `ip`, `uuid`, `host`, `id`, `env`, `phrase`.
+
 ### Optional NLP sidecar contract
 
-NLP mode never bundles a model. When `[nlp].enabled = true`, the plugin connects to the configured
-Unix socket for each extraction with a 180ms read/write deadline. If `socket_path` is omitted it
-uses `HERDR_NLP_SOCKET_PATH`, then `nlp.sock` under the plugin config directory. A connection,
-timeout, or protocol error is logged and the normal regex list is used immediately. Tab mode
-switches repeat the same bounded request, and the header reports `NLP` only after a request
-succeeds.
+For heavier external models (spaCy, transformers, ONNX), enable the Unix-socket sidecar. When
+`[nlp].enabled = true` (or `engine = "sidecar"` / `"auto"`), the plugin connects to the configured
+socket for each extraction with a 180ms read/write deadline. If `socket_path` is omitted it uses
+`HERDR_NLP_SOCKET_PATH`, then `nlp.sock` under the plugin config directory. `engine = "auto"` only
+dials when the socket path already exists. A connection, timeout, or protocol error is logged and
+the built-in list is kept. Tab mode switches repeat the same bounded request, and the header
+reports `NLP` only after a sidecar request succeeds.
 
 The protocol is one JSON request and one JSON response per connection:
 
@@ -210,16 +242,13 @@ The protocol is one JSON request and one JSON response per connection:
 ```json
 {"version":1,"candidates":[
   {"text":"cargo test --release","kind":"command","confidence":0.98},
-  {"text":"--release","kind":"command","confidence":0.91}
+  {"text":"Jon Roosevelt","kind":"phrase","confidence":0.91}
 ]}
 ```
 
-`kind` is one of the stable keys `url`, `path`, `quote`, `squote`, `word`, `command`, `hash`,
-`version`, `error`, or `code`. Candidate text must be at least five characters. Candidates below
-the configured confidence threshold are ignored; accepted candidates replace the regex item's
-kind when their canonical text ties. Any local runtime can implement this contract. For example,
-a Python sidecar can read stdin from a Unix socket, call a locally installed model or rules engine,
-and write the response JSON followed by a newline. The model remains outside this static plugin.
+`kind` is any stable key listed above. Candidate text must be at least five characters. Candidates
+below the configured confidence threshold are ignored; accepted candidates replace or add to the
+built-in item list when their canonical text ties. Any local runtime can implement this contract.
 
 ## Development
 
