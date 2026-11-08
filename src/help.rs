@@ -53,7 +53,8 @@ pub fn all_help_entries() -> &'static [HelpEntry] {
         },
         HelpEntry {
             key: "filter typing",
-            desc: "in insert: type keywords; space = AND; url / @mail / path:foo = quick kind",
+            desc:
+                "in insert: words match in ANY order (AND); if none hit, any-word relaxed results",
         },
         HelpEntry {
             key: "w b e",

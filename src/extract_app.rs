@@ -122,6 +122,10 @@ pub enum ExtractInput {
     CycleKindFilterBack,
     /// Toggle multi-select mark on the current row (Space).
     ToggleMark,
+    /// Page down in list (Ctrl-D in normal/insert).
+    CtrlD,
+    /// Page up in normal mode or clear query in insert mode (Ctrl-U).
+    CtrlU,
     /// Open or close the ? help overlay.
     ToggleHelp,
     /// Enter insert mode at cursor / after / line start / line end.
@@ -193,6 +197,8 @@ pub struct ExtractApp {
     field_mode: FieldMode,
     /// Pending `g` for `gg`.
     pending_g: bool,
+    /// Pending `d` for `dd`.
+    pending_d: bool,
     /// Pending first `j` for `jj` insert-exit.
     pending_j: bool,
     /// ? help overlay open.
@@ -221,6 +227,7 @@ impl ExtractApp {
             // Start insert so typing filters immediately; Esc → normal for j/k commands.
             field_mode: FieldMode::Insert,
             pending_g: false,
+            pending_d: false,
             pending_j: false,
             help_open: false,
             help_query: String::new(),
@@ -306,14 +313,19 @@ impl ExtractApp {
                 }
                 Outcome::Continue
             }
-            ExtractInput::PageUp => {
-                self.help_sel = self.help_sel.saturating_sub(8);
-                Outcome::Continue
-            }
-            ExtractInput::PageDown => {
+            ExtractInput::CtrlD | ExtractInput::PageDown => {
                 let n = crate::help::filter_help_entries(&self.help_query).len();
                 if n > 0 {
                     self.help_sel = (self.help_sel + 8).min(n - 1);
+                }
+                Outcome::Continue
+            }
+            ExtractInput::CtrlU | ExtractInput::PageUp => {
+                if self.help_searching {
+                    self.help_query.clear();
+                    self.help_sel = 0;
+                } else {
+                    self.help_sel = self.help_sel.saturating_sub(8);
                 }
                 Outcome::Continue
             }
@@ -366,6 +378,7 @@ impl ExtractApp {
                     self.refilter();
                 }
                 self.field_mode = FieldMode::Normal;
+                self.clamp_normal_cursor();
                 return Outcome::Continue;
             }
             self.pending_j = true;
@@ -377,13 +390,9 @@ impl ExtractApp {
 
         match input {
             ExtractInput::Esc => {
-                // Recall ladder: insert → normal. Empty insert Esc cancels outright.
-                if self.query.is_empty() && self.kind_filter.is_none() {
-                    Outcome::Cancel
-                } else {
-                    self.field_mode = FieldMode::Normal;
-                    Outcome::Continue
-                }
+                self.field_mode = FieldMode::Normal;
+                self.clamp_normal_cursor();
+                Outcome::Continue
             }
             ExtractInput::Enter => self.confirm(),
             ExtractInput::ToggleMark => {
@@ -404,10 +413,14 @@ impl ExtractApp {
                 self.refilter();
                 Outcome::Continue
             }
-            ExtractInput::ClearQuery => {
+            ExtractInput::CtrlU | ExtractInput::ClearQuery => {
                 self.query.clear();
                 self.query_cursor = 0;
                 self.refilter();
+                Outcome::Continue
+            }
+            ExtractInput::CtrlD => {
+                self.move_sel(10);
                 Outcome::Continue
             }
             ExtractInput::Left => {
@@ -471,6 +484,21 @@ impl ExtractApp {
     }
 
     fn handle_normal(&mut self, input: ExtractInput) -> Outcome {
+        // dd (clear query)
+        if matches!(input, ExtractInput::Char('d')) {
+            if self.pending_d {
+                self.pending_d = false;
+                self.query.clear();
+                self.query_cursor = 0;
+                self.refilter();
+                return Outcome::Continue;
+            }
+            self.pending_d = true;
+            return Outcome::Continue;
+        }
+        let _was_d = self.pending_d;
+        self.pending_d = false;
+
         // gg
         if matches!(input, ExtractInput::Char('g')) {
             if self.pending_g {
@@ -486,7 +514,7 @@ impl ExtractApp {
 
         match input {
             ExtractInput::Esc => {
-                if !self.query.is_empty() {
+                if !self.query.is_empty() || self.kind_filter.is_some() {
                     // clear filter but stay open
                     self.query.clear();
                     self.query_cursor = 0;
@@ -506,11 +534,11 @@ impl ExtractApp {
                 self.move_sel(1);
                 Outcome::Continue
             }
-            ExtractInput::PageUp => {
+            ExtractInput::CtrlU | ExtractInput::PageUp => {
                 self.move_sel(-10);
                 Outcome::Continue
             }
-            ExtractInput::PageDown => {
+            ExtractInput::CtrlD | ExtractInput::PageDown => {
                 self.move_sel(10);
                 Outcome::Continue
             }
@@ -578,7 +606,7 @@ impl ExtractApp {
                 Outcome::Continue
             }
             ExtractInput::End | ExtractInput::Char('$') => {
-                self.query_cursor = self.query.chars().count();
+                self.query_cursor = self.query.chars().count().saturating_sub(1);
                 Outcome::Continue
             }
             ExtractInput::WordForward | ExtractInput::Char('w') => {
@@ -607,15 +635,6 @@ impl ExtractApp {
                 self.query.clear();
                 self.query_cursor = 0;
                 self.refilter();
-                Outcome::Continue
-            }
-            ExtractInput::Char('d') => {
-                // dd clear — second d
-                // use pending via message or simple: single d waits - store pending_d
-                // For simplicity treat d as start of dd: if next is d clear. Use pending_g style.
-                // Re-use pending_g slot? Better pending_d field - skip, map dd via pending_g abuse no.
-                // Single 'd' alone does nothing; 'dd' needs pending. Add pending_d inline via pending_g rename...
-                // Quick: 'c' clear query as alias too
                 Outcome::Continue
             }
             ExtractInput::Left => {
@@ -702,6 +721,16 @@ impl ExtractApp {
         out.extend(chars.iter().take(self.query_cursor));
         out.extend(chars.iter().skip(self.query_cursor + 1));
         self.query = out;
+        self.clamp_normal_cursor();
+    }
+
+    fn clamp_normal_cursor(&mut self) {
+        let count = self.query.chars().count();
+        if count == 0 {
+            self.query_cursor = 0;
+        } else if self.query_cursor >= count {
+            self.query_cursor = count - 1;
+        }
     }
 
     fn delete_query_word(&mut self) {
@@ -859,6 +888,8 @@ impl ExtractApp {
         let selected_item = self.filtered.get(self.selected).map(|item| item.index);
         let parsed = parse_filter_query(&self.query);
         let active_kind = parsed.kind.or(self.kind_filter);
+
+        // Pass 1: AND — every word must match, in any order (fzf-style terms).
         let mut filtered: Vec<FuzzyMatch> = self
             .items
             .iter()
@@ -876,6 +907,32 @@ impl ExtractApp {
                 })
             })
             .collect();
+
+        // Pass 2 (relaxed): only when the list would be empty, keep items that
+        // match ANY typed word, ranked below full matches. Never shows nothing
+        // when at least one typed word exists somewhere.
+        let mut relaxed = false;
+        if filtered.is_empty() && !parsed.tokens.is_empty() {
+            filtered = self
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    if let Some(kind) = active_kind {
+                        if item.kind != kind {
+                            return None;
+                        }
+                    }
+                    score_item_relaxed(item, &parsed.tokens).map(|(score, positions)| FuzzyMatch {
+                        index,
+                        score,
+                        positions,
+                    })
+                })
+                .collect();
+            relaxed = !filtered.is_empty();
+        }
+
         filtered.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
         self.filtered = filtered;
         if self.filtered.is_empty() {
@@ -887,7 +944,11 @@ impl ExtractApp {
             };
             self.message = Some(hint.to_string());
         } else {
-            self.message = None;
+            self.message = if relaxed {
+                Some("relaxed: any word matched — ^u to clear".to_string())
+            } else {
+                None
+            };
             self.selected = selected_item
                 .and_then(|item| {
                     self.filtered
@@ -1148,6 +1209,21 @@ fn resolve_kind_alias(key: &str) -> Option<crate::extract::ItemKind> {
 
 /// Score one item against AND-tokens. Each token must match the item text
 /// (exact/prefix/substring/fuzzy) or the kind label.
+/// Guarantee bonuses on top of the fzf-style base score. Sized so that:
+/// - an exact full-text match always outranks any other hit
+/// - a prefix hit always outranks non-prefix hits
+/// - fzf quality (boundaries, consecutive runs, gap penalties) orders everything
+///   else, including mid-word substring hits vs word-boundary acronyms
+const TIER_EXACT: i32 = 2_000;
+const TIER_PREFIX: i32 = 1_000;
+const TIER_KIND_LABEL: i32 = 800;
+/// Per-missing-token penalty for the relaxed any-word fallback; larger than
+/// any single token's max tier so partial matches rank below full matches.
+const RELAXED_MISS_PENALTY: i32 = 5_000;
+/// Baseline per-char score used by the exact/prefix tiers.
+const SCORE_TIER_CHAR: i32 = 16;
+
+/// AND semantics: every token must match, in any order (order-free).
 fn score_item(item: &ExtractItem, tokens: &[String]) -> Option<(i32, Vec<usize>)> {
     if tokens.is_empty() {
         return Some((0, Vec::new()));
@@ -1164,41 +1240,86 @@ fn score_item(item: &ExtractItem, tokens: &[String]) -> Option<(i32, Vec<usize>)
     Some((total, positions))
 }
 
+/// Relaxed OR semantics used only when the whole list has zero AND hits:
+/// every token is scored, misses cost a fixed penalty so full matches rank first.
+fn score_item_relaxed(item: &ExtractItem, tokens: &[String]) -> Option<(i32, Vec<usize>)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut total = 0i32;
+    let mut positions = Vec::new();
+    let mut matched = 0usize;
+    for token in tokens {
+        if let Some((score, pos)) = match_token(item, token) {
+            total = total.saturating_add(score);
+            positions.extend(pos);
+            matched += 1;
+        } else {
+            total = total.saturating_sub(RELAXED_MISS_PENALTY);
+        }
+    }
+    if matched == 0 {
+        return None;
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    Some((total, positions))
+}
+
 fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
     let token = token.trim();
     if token.is_empty() {
         return Some((0, Vec::new()));
     }
 
-    // Kind-label match: typing "email" while already in all-kinds boosts emails.
+    // Kind-label match: typing "url"/"email" also counts for items of that kind.
     let kind_key = item.kind.stable_key();
-    if kind_key.eq_ignore_ascii_case(token) || resolve_kind_alias(token) == Some(item.kind) {
-        return Some((80, Vec::new()));
-    }
+    let kind_bonus =
+        if kind_key.eq_ignore_ascii_case(token) || resolve_kind_alias(token) == Some(item.kind) {
+            TIER_KIND_LABEL
+        } else {
+            0
+        };
 
     let text = item.text.as_str();
-    let lower_text = text.to_ascii_lowercase();
-    let lower_token = token.to_ascii_lowercase();
+    let smart_case = token.chars().any(|c| c.is_uppercase());
+    // Full Unicode case folding for German Über, French É, etc.
+    let lower_text = text.to_lowercase();
+    let lower_token = token.to_lowercase();
+    let len = token.chars().count();
+    let text_len = text.chars().count();
 
-    // Exact
-    if text == token || lower_text == lower_token {
-        let positions: Vec<usize> = (0..token.chars().count()).collect();
-        return Some((200, positions));
+    let exact = if smart_case {
+        text == token
+    } else {
+        lower_text == lower_token
+    };
+    if exact {
+        return Some((
+            TIER_EXACT + SCORE_TIER_CHAR * text_len as i32 + kind_bonus,
+            (0..text_len).collect(),
+        ));
     }
-    // Prefix
-    if lower_text.starts_with(&lower_token) {
-        let positions: Vec<usize> = (0..token.chars().count()).collect();
-        return Some((150, positions));
+    let prefix = if smart_case {
+        text.starts_with(token)
+    } else {
+        lower_text.starts_with(&lower_token)
+    };
+    if prefix {
+        return Some((
+            TIER_PREFIX + SCORE_TIER_CHAR * len as i32 + kind_bonus,
+            (0..len.min(text_len)).collect(),
+        ));
     }
-    // Continuous substring (case-insensitive)
-    if let Some(byte_idx) = lower_text.find(&lower_token) {
-        let start_char = text[..byte_idx].chars().count();
-        let positions: Vec<usize> = (start_char..start_char + token.chars().count()).collect();
-        return Some((120, positions));
+
+    // Fuzzy subsequence (fzf V2): scores contiguous substring hits high via
+    // consecutive bonuses and boundary bonuses for acronym-style hits.
+    match crate::fuzzy::fuzzy_match(text, token, smart_case) {
+        Some((score, positions)) => Some((score + kind_bonus, positions)),
+        // Text never matched; a kind-label hit alone still counts.
+        None if kind_bonus > 0 => Some((kind_bonus, Vec::new())),
+        None => None,
     }
-    // Fuzzy subsequence
-    let (score, positions) = fuzzy_match(text, token)?;
-    Some((score, positions))
 }
 
 #[cfg(test)]
@@ -1224,85 +1345,10 @@ fn fuzzy_matches(items: &[ExtractItem], query: &str) -> Vec<FuzzyMatch> {
     matches
 }
 
+#[cfg(test)]
 fn fuzzy_match(text: &str, query: &str) -> Option<(i32, Vec<usize>)> {
-    let query_chars: Vec<char> = query.chars().collect();
-    let text_chars: Vec<char> = text.chars().collect();
-    if query_chars.is_empty() {
-        return Some((0, Vec::new()));
-    }
-    if text_chars.is_empty() || query_chars.len() > text_chars.len() {
-        return None;
-    }
-
-    let smart_case = query_chars.iter().any(|character| character.is_uppercase());
-    let mut scores = vec![vec![None; text_chars.len()]; query_chars.len()];
-    let mut previous = vec![vec![None; text_chars.len()]; query_chars.len()];
-
-    for (query_index, query_char) in query_chars.iter().enumerate() {
-        for (text_index, text_char) in text_chars.iter().enumerate() {
-            if !chars_match(*query_char, *text_char, smart_case) {
-                continue;
-            }
-            let base = 10
-                + if is_word_start(&text_chars, text_index) {
-                    15
-                } else {
-                    0
-                };
-            if query_index == 0 {
-                scores[query_index][text_index] = Some(base);
-                continue;
-            }
-            let mut best: Option<(i32, usize)> = None;
-            for (previous_index, previous_score) in
-                scores[query_index - 1].iter().enumerate().take(text_index)
-            {
-                let Some(previous_score) = *previous_score else {
-                    continue;
-                };
-                let run_bonus = if text_index == previous_index + 1 {
-                    20
-                } else {
-                    0
-                };
-                let candidate = previous_score + base + run_bonus;
-                if best.is_none_or(|(score, _)| candidate > score) {
-                    best = Some((candidate, previous_index));
-                }
-            }
-            if let Some((score, previous_index)) = best {
-                scores[query_index][text_index] = Some(score);
-                previous[query_index][text_index] = Some(previous_index);
-            }
-        }
-    }
-
-    let (score, mut text_index) = scores[query_chars.len() - 1]
-        .iter()
-        .enumerate()
-        .filter_map(|(index, score)| score.map(|score| (score, index)))
-        .max_by_key(|(score, index)| (*score, std::cmp::Reverse(*index)))?;
-    let mut positions = vec![text_index];
-    for query_index in (1..query_chars.len()).rev() {
-        text_index = previous[query_index][text_index]?;
-        positions.push(text_index);
-    }
-    positions.reverse();
-    Some((score, positions))
-}
-
-fn chars_match(query: char, text: char, smart_case: bool) -> bool {
-    if smart_case {
-        query == text
-    } else {
-        query.eq_ignore_ascii_case(&text)
-    }
-}
-
-fn is_word_start(text: &[char], index: usize) -> bool {
-    index == 0
-        || (!text[index - 1].is_alphanumeric() && text[index].is_alphanumeric())
-        || (text[index].is_uppercase() && text[index - 1].is_lowercase())
+    let smart_case = query.chars().any(|c| c.is_uppercase());
+    crate::fuzzy::fuzzy_match(text, query, smart_case)
 }
 
 #[cfg(test)]
@@ -1413,7 +1459,11 @@ single: 'single-quoted-token'\n";
     #[test]
     fn esc_cancels() {
         let mut a = app(&["only-item-value"]);
-        assert_eq!(a.handle_char('\u{1b}'), Outcome::Cancel);
+        // Modal ladder: first Esc switches from Insert to Normal mode.
+        assert_eq!(a.handle_input(ExtractInput::Esc), Outcome::Continue);
+        assert_eq!(a.field_mode(), FieldMode::Normal);
+        // Second Esc from Normal mode with empty query cancels and exits.
+        assert_eq!(a.handle_input(ExtractInput::Esc), Outcome::Cancel);
     }
 
     #[test]
@@ -1528,8 +1578,10 @@ single: 'single-quoted-token'\n";
 
     #[test]
     fn fuzzy_matching_is_subsequence_smart_case_and_highlights_positions() {
+        // fzf V2 (verified against junegunn/fzf FuzzyMatchV2 probe) aligns
+        // "hex" on "Herdr Extractor" as H(0), e(1), x(7) with score 81.
         let insensitive = fuzzy_match("Herdr Extractor", "hex").unwrap();
-        assert_eq!(insensitive.1, vec![0, 6, 7]);
+        assert_eq!(insensitive.1, vec![0, 1, 7]);
 
         let smart_case = fuzzy_match("Herdr Extractor", "HX");
         assert!(
@@ -1796,5 +1848,194 @@ single: 'single-quoted-token'\n";
         // i back to insert
         app.handle_input(ExtractInput::Char('i'));
         assert_eq!(app.field_mode(), FieldMode::Insert);
+    }
+
+    #[test]
+    fn out_of_order_words_match_in_any_order() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "https://staging.example/deploy".into(),
+                kind: ItemKind::Url,
+            },
+            ExtractItem {
+                text: "https://prod.example/app".into(),
+                kind: ItemKind::Url,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        // Both orders hit the same single item: words are order-free AND.
+        for q in ["staging deploy", "deploy staging"] {
+            app.handle_input(ExtractInput::ClearQuery);
+            for ch in q.chars() {
+                app.handle_input(ExtractInput::Char(ch));
+            }
+            assert_eq!(
+                app.filtered_count(),
+                1,
+                "query {q:?} should match exactly one item"
+            );
+            assert_eq!(
+                app.selected_item().unwrap().text,
+                "https://staging.example/deploy",
+                "query {q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relaxed_any_word_fallback_when_and_has_no_hits() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "https://staging.example/deploy".into(),
+                kind: ItemKind::Url,
+            },
+            ExtractItem {
+                text: "error: timeout".into(),
+                kind: ItemKind::Error,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        // "deploy zzz": AND has no hit (zzz nowhere), relaxed shows deploy.
+        for ch in "deploy zzz".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 1);
+        assert_eq!(
+            app.selected_item().unwrap().text,
+            "https://staging.example/deploy"
+        );
+        assert!(
+            app.message().unwrap_or("").starts_with("relaxed"),
+            "expected relaxed notice, got {:?}",
+            app.message()
+        );
+        // A word with no hits anywhere still reports no matches.
+        app.handle_input(ExtractInput::ClearQuery);
+        for ch in "qqqzzz".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 0);
+        assert!(app.message().unwrap_or("").starts_with("no matches"));
+    }
+
+    #[test]
+    fn boundary_ranking_puts_word_start_hits_first() {
+        let theme = Theme::default();
+        let items = vec![
+            ExtractItem {
+                text: "please-x-review".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "api.staging".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut app = ExtractApp::new(items, theme);
+        // "as": a/s on word boundaries in api.staging beat mid-word hits.
+        // Ranking assertion checks row order (selection identity is preserved
+        // across keystrokes by design, like fzf).
+        for ch in "as".chars() {
+            app.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(app.filtered_count(), 2);
+        let rows = app.visible_rows();
+        assert_eq!(rows[0].1, "api.staging", "boundary hit must rank first");
+        assert_eq!(rows[1].1, "please-x-review");
+    }
+
+    #[test]
+    fn normal_mode_cursor_clamping_and_x_delete() {
+        let mut a = app(&["test-value"]);
+        for ch in "word1 word2".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(a.query(), "word1 word2");
+        assert_eq!(a.query_cursor(), 11);
+        // Switch to normal mode: cursor clamped to last char (10)
+        a.handle_input(ExtractInput::Esc);
+        assert_eq!(a.field_mode(), FieldMode::Normal);
+        assert_eq!(a.query_cursor(), 10);
+        // 'x' deletes char under cursor ('2')
+        a.handle_input(ExtractInput::Char('x'));
+        assert_eq!(a.query(), "word1 word");
+        assert_eq!(a.query_cursor(), 9);
+        // '$' moves to last char ('d' at index 9)
+        a.handle_input(ExtractInput::Char('$'));
+        assert_eq!(a.query_cursor(), 9);
+        a.handle_input(ExtractInput::Char('x'));
+        assert_eq!(a.query(), "word1 wor");
+        assert_eq!(a.query_cursor(), 8);
+    }
+
+    #[test]
+    fn normal_mode_dd_clears_query() {
+        let mut a = app(&["test-value"]);
+        for ch in "foo bar".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        a.handle_input(ExtractInput::Esc);
+        assert_eq!(a.field_mode(), FieldMode::Normal);
+        assert_eq!(a.query(), "foo bar");
+        // first 'd' primes pending_d
+        a.handle_input(ExtractInput::Char('d'));
+        assert_eq!(a.query(), "foo bar");
+        // second 'd' executes dd (clears query)
+        a.handle_input(ExtractInput::Char('d'));
+        assert_eq!(a.query(), "");
+        assert_eq!(a.query_cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_page_and_clear() {
+        let many: Vec<String> = (0..30).map(|i| format!("item-{i}")).collect();
+        let strs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let mut a = app(&strs);
+        // In insert mode: CtrlD scrolls list down 10 rows
+        assert_eq!(a.selected_index(), 0);
+        a.handle_input(ExtractInput::CtrlD);
+        assert_eq!(a.selected_index(), 10);
+        // In insert mode: CtrlU clears query
+        for ch in "search".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(a.query(), "search");
+        a.handle_input(ExtractInput::CtrlU);
+        assert_eq!(a.query(), "");
+
+        // Switch to normal mode: CtrlD moves down 10, CtrlU moves up 10
+        a.handle_input(ExtractInput::Esc);
+        assert_eq!(a.selected_index(), 0);
+        a.handle_input(ExtractInput::CtrlD);
+        assert_eq!(a.selected_index(), 10);
+        a.handle_input(ExtractInput::CtrlD);
+        assert_eq!(a.selected_index(), 20);
+        a.handle_input(ExtractInput::CtrlU);
+        assert_eq!(a.selected_index(), 10);
+    }
+
+    #[test]
+    fn unicode_case_folding_exact_tier() {
+        let items = vec![
+            ExtractItem {
+                text: "Über".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "überflüssig".into(),
+                kind: ItemKind::Word,
+            },
+        ];
+        let mut a = ExtractApp::new(items, Theme::default());
+        for ch in "über".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(a.filtered_count(), 2);
+        let rows = a.visible_rows();
+        // Exact match under Unicode case folding must rank first ahead of prefix
+        assert_eq!(rows[0].1, "Über");
+        assert_eq!(rows[1].1, "überflüssig");
     }
 }
