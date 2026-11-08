@@ -337,9 +337,10 @@ fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
             KeyCode::Char('g') | KeyCode::Char('G') => Some(ExtractInput::SwitchMode),
             KeyCode::Char('n') | KeyCode::Char('N') => Some(ExtractInput::Down),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(ExtractInput::Up),
-            // fzf-style readline edits + extrakto-style kind cycle
+            // fzf-style readline edits + extrakto-style kind cycle + page motions
             KeyCode::Char('w') | KeyCode::Char('W') => Some(ExtractInput::DeleteWord),
-            KeyCode::Char('u') | KeyCode::Char('U') => Some(ExtractInput::ClearQuery),
+            KeyCode::Char('u') | KeyCode::Char('U') => Some(ExtractInput::CtrlU),
+            KeyCode::Char('d') | KeyCode::Char('D') => Some(ExtractInput::CtrlD),
             KeyCode::Char('k') | KeyCode::Char('K') => Some(ExtractInput::CycleKindFilter),
             KeyCode::Char('j') | KeyCode::Char('J') => Some(ExtractInput::CycleKindFilterBack),
             KeyCode::Char('a') | KeyCode::Char('A') => Some(ExtractInput::Home),
