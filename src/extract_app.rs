@@ -885,7 +885,6 @@ impl ExtractApp {
     }
 
     fn refilter(&mut self) {
-        let selected_item = self.filtered.get(self.selected).map(|item| item.index);
         let parsed = parse_filter_query(&self.query);
         let active_kind = parsed.kind.or(self.kind_filter);
 
@@ -933,10 +932,23 @@ impl ExtractApp {
             relaxed = !filtered.is_empty();
         }
 
-        filtered.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+        filtered.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| {
+                    self.items[b.index]
+                        .kind
+                        .rank_value()
+                        .cmp(&self.items[a.index].kind.rank_value())
+                })
+                .then_with(|| a.index.cmp(&b.index))
+        });
         self.filtered = filtered;
+        // When typing/filtering, the cursor/selection highlight must always
+        // immediately rest on the top/best match (index 0), never stuck on an
+        // arbitrary previously-highlighted item in the middle of the list.
+        self.selected = 0;
         if self.filtered.is_empty() {
-            self.selected = 0;
             let hint = if active_kind.is_some() || !parsed.tokens.is_empty() {
                 "no matches — clear filter or try kind:url / @email / multi words"
             } else {
@@ -949,13 +961,6 @@ impl ExtractApp {
             } else {
                 None
             };
-            self.selected = selected_item
-                .and_then(|item| {
-                    self.filtered
-                        .iter()
-                        .position(|candidate| candidate.index == item)
-                })
-                .unwrap_or(0);
         }
     }
 
@@ -1164,8 +1169,10 @@ fn parse_filter_query(query: &str) -> ParsedQuery {
         .map(|t| t.to_string())
         .collect();
 
-    // Sole token that is a kind alias → quick kind filter (type "url" alone).
-    if kind.is_none() && tokens.len() == 1 {
+    // Sole token that is a multi-character kind alias → quick kind filter (type "url" alone).
+    // Single-character aliases (u, p, e, i, c, etc.) require colon syntax ("u:...") so typing
+    // a single letter (e.g. 'i' for "item" or "install") does not hijack normal typing.
+    if kind.is_none() && tokens.len() == 1 && tokens[0].chars().count() >= 2 {
         if let Some(parsed) = resolve_kind_alias(&tokens[0]) {
             kind = Some(parsed);
             tokens.clear();
@@ -1273,13 +1280,16 @@ fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
     }
 
     // Kind-label match: typing "url"/"email" also counts for items of that kind.
+    // Single-character aliases (u, p, e, i, etc.) are excluded so typing a
+    // single character does not bias toward unrelated kinds.
     let kind_key = item.kind.stable_key();
-    let kind_bonus =
-        if kind_key.eq_ignore_ascii_case(token) || resolve_kind_alias(token) == Some(item.kind) {
-            TIER_KIND_LABEL
-        } else {
-            0
-        };
+    let kind_bonus = if kind_key.eq_ignore_ascii_case(token)
+        || (token.chars().count() >= 2 && resolve_kind_alias(token) == Some(item.kind))
+    {
+        TIER_KIND_LABEL
+    } else {
+        0
+    };
 
     let text = item.text.as_str();
     let smart_case = token.chars().any(|c| c.is_uppercase());
@@ -1289,10 +1299,14 @@ fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
     let len = token.chars().count();
     let text_len = text.chars().count();
 
+    // Allow unquoted matching so 'quoted' and `code` match user-typed text.
+    let unquoted = text.trim_matches(['\'', '"', '`']);
+    let unquoted_lower = unquoted.to_lowercase();
+
     let exact = if smart_case {
-        text == token
+        text == token || unquoted == token
     } else {
-        lower_text == lower_token
+        lower_text == lower_token || unquoted_lower == lower_token
     };
     if exact {
         return Some((
@@ -1301,9 +1315,9 @@ fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
         ));
     }
     let prefix = if smart_case {
-        text.starts_with(token)
+        text.starts_with(token) || unquoted.starts_with(token)
     } else {
-        lower_text.starts_with(&lower_token)
+        lower_text.starts_with(&lower_token) || unquoted_lower.starts_with(&lower_token)
     };
     if prefix {
         return Some((
@@ -2037,5 +2051,66 @@ single: 'single-quoted-token'\n";
         // Exact match under Unicode case folding must rank first ahead of prefix
         assert_eq!(rows[0].1, "Über");
         assert_eq!(rows[1].1, "überflüssig");
+    }
+
+    #[test]
+    fn search_string_places_selection_on_top_match_at_row_zero() {
+        let many: Vec<String> = (0..50).map(|i| format!("item-{}", 50 - i)).collect();
+        let strs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let mut a = app(&strs);
+        // Before typing, scroll selection deep into the middle/bottom of the list
+        for _ in 0..25 {
+            a.handle_input(ExtractInput::Down);
+        }
+        assert_eq!(a.selected_index(), 25);
+
+        // Put in a search string: selection MUST be placed on the best match (index 0)
+        // at the top of the list, never stuck on an old selection in the middle of the screen.
+        for ch in "item-5".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(a.selected_index(), 0);
+        let rows = a.visible_rows();
+        assert_eq!(rows[0].1, "item-5");
+        assert_eq!(a.selected_item().unwrap().text, "item-5");
+    }
+
+    #[test]
+    fn single_character_queries_do_not_hijack_into_kind_filters() {
+        let items = vec![
+            ExtractItem {
+                text: "item-manager".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "api.internal".into(),
+                kind: ItemKind::Word,
+            },
+            ExtractItem {
+                text: "10.0.0.1".into(),
+                kind: ItemKind::Ip,
+            },
+        ];
+        let mut a = ExtractApp::new(items, Theme::default());
+        // Typing 'i' alone must search for 'i' in text:
+        // - "item-manager" matches via prefix
+        // - "api.internal" matches via mid-word 'i'
+        // - "10.0.0.1" (an IP) must NOT match because 'i' does not hijack into kind:ip!
+        a.handle_input(ExtractInput::Char('i'));
+        assert_eq!(a.filtered_count(), 2);
+        let rows = a.visible_rows();
+        assert_eq!(rows[0].1, "item-manager");
+        assert_eq!(rows[1].1, "api.internal");
+        assert_eq!(a.selected_item().unwrap().text, "item-manager");
+
+        // Colon syntax still works for single-character kind filter:
+        // "i:10" matches only the IP item.
+        a.handle_input(ExtractInput::ClearQuery);
+        for ch in "i:10".chars() {
+            a.handle_input(ExtractInput::Char(ch));
+        }
+        assert_eq!(a.filtered_count(), 1);
+        assert_eq!(a.selected_item().unwrap().text, "10.0.0.1");
+        assert_eq!(a.selected_item().unwrap().kind, ItemKind::Ip);
     }
 }

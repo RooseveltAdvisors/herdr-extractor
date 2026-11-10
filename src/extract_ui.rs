@@ -37,8 +37,8 @@ pub fn draw_with_visible_geometry(
     }
     draw_header(frame, app, area);
     draw_prompt(frame, app, area);
-    // fzf parity: keep the terminal cursor at the query caret (display width).
-    if area.height >= 2 {
+    // fzf parity: in Insert mode, place the hardware cursor at the typing caret.
+    if area.height >= 2 && app.field_mode() == crate::extract_app::FieldMode::Insert {
         let glyph = if app.theme().use_icons {
             " 󰍉 "
         } else {
@@ -80,6 +80,27 @@ pub fn draw_with_visible_geometry(
     frame.render_widget(Paragraph::new(lines), body_area);
     if let Some(reserved_area) = reserved_bottom_rows(area) {
         frame.render_widget(Clear, reserved_area);
+    }
+
+    // In Normal mode, place the hardware cursor on the active match row
+    // (on the ▌ selection rail), so the cursor rests directly on the match.
+    if area.height >= 2 && app.field_mode() == crate::extract_app::FieldMode::Normal {
+        let selected = app.selected_index();
+        let rows_len = app.filtered_count();
+        if rows_len > 0 && body_area.height > 0 {
+            let max_rows = usize::from(body_area.height);
+            let start = if rows_len <= max_rows || selected < max_rows / 2 {
+                0
+            } else if selected + (max_rows - max_rows / 2) >= rows_len {
+                rows_len - max_rows
+            } else {
+                selected - max_rows / 2
+            };
+            let row_offset = selected.saturating_sub(start) as u16;
+            if row_offset < body_area.height {
+                frame.set_cursor_position((body_area.x, body_area.y + row_offset));
+            }
+        }
     }
 }
 
@@ -548,22 +569,20 @@ fn draw_detail(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect, lines: &[Det
     };
     let theme = app.theme();
     let accent = theme.kind_color(item.kind);
-    let text_style = theme
-        .detail_style()
-        .fg(theme.selected_match_fg)
-        .bg(theme.selected_match_bg)
+    let bg = theme.detail_bg;
+    let text_style = Style::default().fg(theme.detail_fg).bg(bg);
+    let prefix_style = Style::default()
+        .fg(accent)
+        .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let prefix_style = Style::default().fg(accent).bg(theme.selected_match_bg);
-    let fill = theme
-        .detail_style()
-        .fg(theme.selected_match_fg)
-        .bg(theme.selected_match_bg);
+    let rail_style = Style::default().fg(theme.header_muted_fg).bg(bg);
+    let fill = Style::default().bg(bg);
     let width = usize::from(area.width);
     let rendered = lines
         .iter()
         .map(|line| {
             let mut spans = vec![
-                Span::styled("▌".to_string(), prefix_style),
+                Span::styled("│".to_string(), rail_style),
                 Span::styled(line.prefix.clone(), prefix_style),
                 Span::styled(line.text.clone(), text_style),
             ];
