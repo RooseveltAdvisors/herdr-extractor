@@ -3,6 +3,8 @@
 //! Pure state machine: filter items by query, move the selection, copy or cancel.
 //! No terminal I/O — fully unit-testable.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::extract::ExtractItem;
 use crate::theme::Theme;
 use crate::Outcome;
@@ -184,6 +186,7 @@ pub struct ExtractApp {
     /// Index into `filtered`.
     selected: usize,
     message: Option<String>,
+    relaxed_search: bool,
     mode: ExtractMode,
     engine: ExtractionEngine,
     theme: Theme,
@@ -195,10 +198,8 @@ pub struct ExtractApp {
     marked: std::collections::BTreeSet<usize>,
     /// Insert = type filter; Normal = commands / list motion.
     field_mode: FieldMode,
-    /// Pending `g` for `gg`.
-    pending_g: bool,
-    /// Pending `d` for `dd`.
-    pending_d: bool,
+    /// One pending normal chord, consumed by the very next input.
+    pending_chord: Option<char>,
     /// Pending first `j` for `jj` insert-exit.
     pending_j: bool,
     /// ? help overlay open.
@@ -218,6 +219,7 @@ impl ExtractApp {
             query: String::new(),
             selected: 0,
             message: None,
+            relaxed_search: false,
             mode: ExtractMode::Scrollback,
             engine: ExtractionEngine::Regex,
             theme,
@@ -226,8 +228,7 @@ impl ExtractApp {
             marked: std::collections::BTreeSet::new(),
             // Start insert so typing filters immediately; Esc → normal for j/k commands.
             field_mode: FieldMode::Insert,
-            pending_g: false,
-            pending_d: false,
+            pending_chord: None,
             pending_j: false,
             help_open: false,
             help_query: String::new(),
@@ -261,11 +262,51 @@ impl ExtractApp {
         )
     }
 
+    /// Paste is one literal edit, never a stream of modal commands.
+    pub fn handle_paste(&mut self, text: &str) {
+        self.pending_j = false;
+        self.pending_chord = None;
+        let text: String = text
+            .chars()
+            .filter_map(|c| {
+                if matches!(c, '\n' | '\r' | '\t') {
+                    Some(' ')
+                } else if c.is_control() {
+                    None
+                } else {
+                    Some(c)
+                }
+            })
+            .collect();
+        if self.help_open {
+            if self.help_searching {
+                self.help_query.push_str(&text);
+                self.help_sel = 0;
+            }
+        } else if self.field_mode == FieldMode::Insert {
+            let byte = self
+                .query
+                .char_indices()
+                .nth(self.query_cursor)
+                .map_or(self.query.len(), |(i, _)| i);
+            self.query.insert_str(byte, &text);
+            let end = self.query_cursor + text.chars().count();
+            let cursor = self
+                .grapheme_boundaries()
+                .find(|&i| i >= end)
+                .unwrap_or(end);
+            self.query_cursor = cursor;
+            self.refilter();
+        }
+    }
+
     pub fn handle_input(&mut self, input: ExtractInput) -> Outcome {
         // Global: always honor cancel / help toggle first.
         match input {
             ExtractInput::CtrlC => return Outcome::Cancel,
             ExtractInput::ToggleHelp => {
+                self.pending_chord = None;
+                self.pending_j = false;
                 self.help_open = !self.help_open;
                 if self.help_open {
                     self.help_sel = 0;
@@ -282,13 +323,27 @@ impl ExtractApp {
             return self.handle_help_input(input);
         }
 
-        match self.field_mode {
+        let outcome = match self.field_mode {
             FieldMode::Insert => self.handle_insert(input),
             FieldMode::Normal => self.handle_normal(input),
+        };
+        self.query_cursor = self
+            .grapheme_boundaries()
+            .take_while(|&i| i <= self.query_cursor)
+            .last()
+            .unwrap_or(0);
+        if self.field_mode == FieldMode::Normal {
+            self.clamp_normal_cursor();
         }
+        outcome
     }
 
     fn handle_help_input(&mut self, input: ExtractInput) -> Outcome {
+        let input = match input {
+            ExtractInput::Char('j') if !self.help_searching => ExtractInput::Down,
+            ExtractInput::Char('k') if !self.help_searching => ExtractInput::Up,
+            other => other,
+        };
         match input {
             ExtractInput::Esc | ExtractInput::ToggleHelp => {
                 if self.help_searching {
@@ -424,16 +479,11 @@ impl ExtractApp {
                 Outcome::Continue
             }
             ExtractInput::Left => {
-                if self.query_cursor > 0 {
-                    self.query_cursor -= 1;
-                }
+                self.query_cursor = self.previous_grapheme();
                 Outcome::Continue
             }
             ExtractInput::Right => {
-                let len = self.query.chars().count();
-                if self.query_cursor < len {
-                    self.query_cursor += 1;
-                }
+                self.query_cursor = self.next_grapheme();
                 Outcome::Continue
             }
             ExtractInput::Home => {
@@ -484,33 +534,22 @@ impl ExtractApp {
     }
 
     fn handle_normal(&mut self, input: ExtractInput) -> Outcome {
-        // dd (clear query)
-        if matches!(input, ExtractInput::Char('d')) {
-            if self.pending_d {
-                self.pending_d = false;
-                self.query.clear();
-                self.query_cursor = 0;
-                self.refilter();
-                return Outcome::Continue;
+        // Every input consumes the previous chord, including unknown suffixes.
+        let pending = self.pending_chord.take();
+        if let ExtractInput::Char(ch @ ('d' | 'g')) = input {
+            if pending == Some(ch) {
+                if ch == 'd' {
+                    self.query.clear();
+                    self.query_cursor = 0;
+                    self.refilter();
+                } else {
+                    self.selected = 0;
+                }
+            } else {
+                self.pending_chord = Some(ch);
             }
-            self.pending_d = true;
             return Outcome::Continue;
         }
-        let _was_d = self.pending_d;
-        self.pending_d = false;
-
-        // gg
-        if matches!(input, ExtractInput::Char('g')) {
-            if self.pending_g {
-                self.pending_g = false;
-                self.selected = 0;
-                return Outcome::Continue;
-            }
-            self.pending_g = true;
-            return Outcome::Continue;
-        }
-        let was_g = self.pending_g;
-        self.pending_g = false;
 
         match input {
             ExtractInput::Esc => {
@@ -542,7 +581,7 @@ impl ExtractApp {
                 self.move_sel(10);
                 Outcome::Continue
             }
-            ExtractInput::JumpFirst | ExtractInput::Char('g') if was_g => {
+            ExtractInput::JumpFirst => {
                 self.selected = 0;
                 Outcome::Continue
             }
@@ -584,10 +623,7 @@ impl ExtractApp {
                 Outcome::Continue
             }
             ExtractInput::EnterInsertAfter | ExtractInput::Char('a') => {
-                let len = self.query.chars().count();
-                if self.query_cursor < len {
-                    self.query_cursor += 1;
-                }
+                self.query_cursor = self.next_grapheme();
                 self.field_mode = FieldMode::Insert;
                 Outcome::Continue
             }
@@ -638,16 +674,11 @@ impl ExtractApp {
                 Outcome::Continue
             }
             ExtractInput::Left => {
-                if self.query_cursor > 0 {
-                    self.query_cursor -= 1;
-                }
+                self.query_cursor = self.previous_grapheme();
                 Outcome::Continue
             }
             ExtractInput::Right => {
-                let len = self.query.chars().count();
-                if self.query_cursor < len {
-                    self.query_cursor += 1;
-                }
+                self.query_cursor = self.next_grapheme();
                 Outcome::Continue
             }
             ExtractInput::Char('/') => {
@@ -697,10 +728,8 @@ impl ExtractApp {
         if n == 0 {
             return;
         }
-        let mut i = self.query_cursor;
-        if i < n && !chars[i].is_whitespace() {
-            i += 1;
-        }
+        // Skip the whole current cluster so repeating `e` always progresses.
+        let mut i = self.next_grapheme();
         while i < n && chars[i].is_whitespace() {
             i += 1;
         }
@@ -712,6 +741,27 @@ impl ExtractApp {
         }
     }
 
+    /// Search uses scalar indices, but editing stops only at grapheme boundaries.
+    fn grapheme_boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(0).chain(self.query.graphemes(true).scan(0, |index, grapheme| {
+            *index += grapheme.chars().count();
+            Some(*index)
+        }))
+    }
+
+    fn previous_grapheme(&self) -> usize {
+        self.grapheme_boundaries()
+            .take_while(|&i| i < self.query_cursor)
+            .last()
+            .unwrap_or(0)
+    }
+
+    fn next_grapheme(&self) -> usize {
+        self.grapheme_boundaries()
+            .find(|&i| i > self.query_cursor)
+            .unwrap_or(self.query_cursor)
+    }
+
     fn delete_under_cursor(&mut self) {
         let chars: Vec<char> = self.query.chars().collect();
         if self.query_cursor >= chars.len() {
@@ -719,7 +769,7 @@ impl ExtractApp {
         }
         let mut out = String::new();
         out.extend(chars.iter().take(self.query_cursor));
-        out.extend(chars.iter().skip(self.query_cursor + 1));
+        out.extend(chars.iter().skip(self.next_grapheme()));
         self.query = out;
         self.clamp_normal_cursor();
     }
@@ -728,8 +778,12 @@ impl ExtractApp {
         let count = self.query.chars().count();
         if count == 0 {
             self.query_cursor = 0;
-        } else if self.query_cursor >= count {
-            self.query_cursor = count - 1;
+        } else {
+            self.query_cursor = self
+                .grapheme_boundaries()
+                .take_while(|&i| i <= self.query_cursor && i < count)
+                .last()
+                .unwrap_or(0);
         }
     }
 
@@ -760,7 +814,12 @@ impl ExtractApp {
         out.push(ch);
         out.extend(chars.iter().skip(self.query_cursor));
         self.query = out;
-        self.query_cursor += 1;
+        let inserted_end = self.query_cursor + 1;
+        let cursor = self
+            .grapheme_boundaries()
+            .find(|&i| i >= inserted_end)
+            .unwrap_or(inserted_end);
+        self.query_cursor = cursor;
     }
 
     fn backspace_at_cursor(&mut self) {
@@ -769,10 +828,11 @@ impl ExtractApp {
         }
         let chars: Vec<char> = self.query.chars().collect();
         let mut out = String::new();
-        out.extend(chars.iter().take(self.query_cursor - 1));
+        let previous = self.previous_grapheme();
+        out.extend(chars.iter().take(previous));
         out.extend(chars.iter().skip(self.query_cursor));
         self.query = out;
-        self.query_cursor -= 1;
+        self.query_cursor = previous;
     }
 
     fn cycle_kind_filter(&mut self) {
@@ -944,6 +1004,7 @@ impl ExtractApp {
                 .then_with(|| a.index.cmp(&b.index))
         });
         self.filtered = filtered;
+        self.relaxed_search = relaxed;
         // When typing/filtering, the cursor/selection highlight must always
         // immediately rest on the top/best match (index 0), never stuck on an
         // arbitrary previously-highlighted item in the middle of the list.
@@ -956,12 +1017,12 @@ impl ExtractApp {
             };
             self.message = Some(hint.to_string());
         } else {
-            self.message = if relaxed {
-                Some("relaxed: any word matched — ^u to clear".to_string())
-            } else {
-                None
-            };
+            self.message = None;
         }
+    }
+
+    pub fn relaxed_search(&self) -> bool {
+        self.relaxed_search
     }
 
     /// Human-readable active filter summary for the prompt chrome.
@@ -988,6 +1049,14 @@ impl ExtractApp {
     }
 
     pub fn message(&self) -> Option<&str> {
+        self.status_message().or_else(|| {
+            self.relaxed_search
+                .then_some("relaxed: any word matched - ^u to clear")
+        })
+    }
+
+    /// Operational notices are independent of relaxed-search semantics.
+    pub fn status_message(&self) -> Option<&str> {
         self.message.as_deref()
     }
 
@@ -1293,7 +1362,7 @@ fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
 
     let text = item.text.as_str();
     let smart_case = token.chars().any(|c| c.is_uppercase());
-    // Full Unicode case folding for German Über, French É, etc.
+    // Unicode lowercasing for case-insensitive tiers, not full case folding.
     let lower_text = text.to_lowercase();
     let lower_token = token.to_lowercase();
     let len = token.chars().count();
@@ -1303,26 +1372,71 @@ fn match_token(item: &ExtractItem, token: &str) -> Option<(i32, Vec<usize>)> {
     let unquoted = text.trim_matches(['\'', '"', '`']);
     let unquoted_lower = unquoted.to_lowercase();
 
-    let exact = if smart_case {
-        text == token || unquoted == token
+    let unquoted_offset = text
+        .chars()
+        .take_while(|c| matches!(c, '\'' | '"' | '`'))
+        .count();
+    let exact_raw = if smart_case {
+        text == token
     } else {
-        lower_text == lower_token || unquoted_lower == lower_token
+        lower_text == lower_token
     };
-    if exact {
+    let exact_unquoted = if smart_case {
+        unquoted == token
+    } else {
+        unquoted_lower == lower_token
+    };
+    if exact_raw || exact_unquoted {
+        let (offset, count) = if exact_raw {
+            (0, text_len)
+        } else {
+            (unquoted_offset, unquoted.chars().count())
+        };
         return Some((
             TIER_EXACT + SCORE_TIER_CHAR * text_len as i32 + kind_bonus,
-            (0..text_len).collect(),
+            (offset..offset + count).collect(),
         ));
     }
-    let prefix = if smart_case {
-        text.starts_with(token) || unquoted.starts_with(token)
+    let prefix_raw = if smart_case {
+        text.starts_with(token)
     } else {
-        lower_text.starts_with(&lower_token) || unquoted_lower.starts_with(&lower_token)
+        lower_text.starts_with(&lower_token)
     };
-    if prefix {
+    let prefix_unquoted = if smart_case {
+        unquoted.starts_with(token)
+    } else {
+        unquoted_lower.starts_with(&lower_token)
+    };
+    if prefix_raw || prefix_unquoted {
+        let (view, offset) = if prefix_raw {
+            (text, 0)
+        } else {
+            (unquoted, unquoted_offset)
+        };
+        // Lowercasing can expand one original scalar into several matched scalars.
+        let needed = if smart_case {
+            len
+        } else {
+            lower_token.chars().count()
+        };
+        let mut consumed = 0;
+        let positions = view
+            .chars()
+            .enumerate()
+            .take_while(|(_, c)| {
+                let take = consumed < needed;
+                consumed += if smart_case {
+                    1
+                } else {
+                    c.to_lowercase().count()
+                };
+                take
+            })
+            .map(|(i, _)| offset + i)
+            .collect();
         return Some((
             TIER_PREFIX + SCORE_TIER_CHAR * len as i32 + kind_bonus,
-            (0..len.min(text_len)).collect(),
+            positions,
         ));
     }
 
@@ -1370,6 +1484,123 @@ mod tests {
     use super::*;
     use crate::extract::{ExtractItem, ItemKind};
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn paste_is_literal_atomic_and_mode_scoped() {
+        let mut app = ExtractApp::new(Vec::new(), Theme::default());
+        app.handle_paste("Café ?jj [x]:+ 👩‍💻");
+        assert_eq!(app.query(), "Café ?jj [x]:+ 👩‍💻");
+        assert_eq!(app.field_mode(), FieldMode::Insert);
+        assert!(!app.help_open());
+        app.handle_input(ExtractInput::Home);
+        app.handle_paste("abc\nxyz\t");
+        assert!(app.query().starts_with("abc xyz "));
+        let query = app.query().to_string();
+        app.handle_input(ExtractInput::Esc);
+        app.handle_paste("dd?gg");
+        assert_eq!(app.query(), query);
+        assert!(!app.help_open());
+        app.handle_input(ExtractInput::ToggleHelp);
+        app.handle_input(ExtractInput::Char('/'));
+        app.handle_paste("j/k");
+        assert_eq!(app.help_query(), "j/k");
+    }
+
+    #[test]
+    fn unquoted_match_positions_map_back_to_original_scalars() {
+        for (text, query, expected) in [
+            ("`éclairToken`", "écl", vec![1, 2, 3]),
+            ("\"éclair\"", "éclair", vec![1, 2, 3, 4, 5, 6]),
+            ("'İstanbul'", "i\u{307}s", vec![1, 2]),
+        ] {
+            let item = ExtractItem {
+                text: text.into(),
+                kind: ItemKind::Code,
+            };
+            assert_eq!(match_token(&item, query).unwrap().1, expected);
+        }
+    }
+
+    #[test]
+    fn normal_chords_cancel_on_help_and_interrupted_sequences() {
+        for sequence in ["g?g", "gdg", "gzg"] {
+            let mut app = ExtractApp::new(items(&["alpha", "bravo", "charlie"]), Theme::default());
+            app.handle_input(ExtractInput::Esc);
+            app.handle_input(ExtractInput::Down);
+            for c in sequence.chars() {
+                if c == '?' {
+                    app.handle_input(ExtractInput::ToggleHelp);
+                    app.handle_input(ExtractInput::Esc);
+                } else {
+                    app.handle_input(ExtractInput::Char(c));
+                }
+            }
+            assert_eq!(app.selected_index(), 1, "{sequence}");
+        }
+        let mut app = ExtractApp::new(Vec::new(), Theme::default());
+        app.handle_input(ExtractInput::Char('a'));
+        app.handle_input(ExtractInput::Esc);
+        app.handle_input(ExtractInput::Char('d'));
+        app.handle_input(ExtractInput::ToggleHelp);
+        app.handle_input(ExtractInput::Char('j'));
+        assert_eq!(app.help_sel(), 1);
+        app.handle_input(ExtractInput::Char('k'));
+        assert_eq!(app.help_sel(), 0);
+        app.handle_input(ExtractInput::Esc);
+        app.handle_input(ExtractInput::Char('d'));
+        assert_eq!(app.query(), "a");
+    }
+
+    #[test]
+    fn repeated_word_end_advances_past_combining_and_emoji_clusters() {
+        for cluster in ["e\u{301}", "👩‍💻", "🇺🇸", "漢", "z"] {
+            let mut app = ExtractApp::new(Vec::new(), Theme::default());
+            for c in format!("AA {cluster} QQ").chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            for input in [
+                ExtractInput::Esc,
+                ExtractInput::Home,
+                ExtractInput::WordForward,
+                ExtractInput::WordEnd,
+            ] {
+                app.handle_input(input);
+            }
+            assert_eq!(app.query_cursor(), 3 + cluster.chars().count() + 2);
+        }
+    }
+
+    #[test]
+    fn query_editing_keeps_grapheme_boundaries_in_both_modes() {
+        for cluster in ["e\u{301}", "👩‍💻", "漢", "🇺🇸"] {
+            let mut app = ExtractApp::new(Vec::new(), Theme::default());
+            for c in format!("AB{cluster}CD").chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            for _ in 0..3 {
+                app.handle_input(ExtractInput::Left);
+            }
+            assert_eq!(app.query_cursor(), 2);
+            app.handle_input(ExtractInput::Char('X'));
+            assert_eq!(app.query(), format!("ABX{cluster}CD"));
+            app.handle_input(ExtractInput::Backspace);
+            assert_eq!(app.query(), format!("AB{cluster}CD"));
+            app.handle_input(ExtractInput::Right);
+            app.handle_input(ExtractInput::Backspace);
+            assert_eq!(app.query(), "ABCD");
+
+            app.handle_input(ExtractInput::ClearQuery);
+            for c in cluster.chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            app.handle_input(ExtractInput::Esc);
+            assert_eq!(app.query_cursor(), 0);
+            app.handle_input(ExtractInput::Char('a'));
+            assert_eq!(app.query_cursor(), cluster.chars().count());
+            app.handle_input(ExtractInput::Backspace);
+            assert_eq!(app.query(), "");
+        }
+    }
 
     fn items(texts: &[&str]) -> Vec<ExtractItem> {
         texts

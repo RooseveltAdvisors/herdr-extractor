@@ -5,7 +5,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::extract::{ExtractItem, ItemKind};
 use crate::extract_app::{ExtractApp, ExtractionEngine};
@@ -37,47 +38,26 @@ pub fn draw_with_visible_geometry(
     }
     draw_header(frame, app, area);
     draw_prompt(frame, app, area);
-    // fzf parity: in Insert mode, place the hardware cursor at the typing caret.
-    if area.height >= 2 && app.field_mode() == crate::extract_app::FieldMode::Insert {
-        let glyph = if app.theme().use_icons {
-            " 󰍉 "
-        } else {
-            " > "
-        };
-        let kind_hint = app
-            .kind_filter()
-            .map(|k| format!("[{}] ", k.stable_key()))
-            .unwrap_or_default();
-        let prefix_cols = UnicodeWidthStr::width(glyph) as u16
-            + UnicodeWidthStr::width(kind_hint.as_str()) as u16;
-        let caret = app
-            .query()
-            .chars()
-            .take(app.query_cursor())
-            .collect::<String>();
-        let caret_cols = UnicodeWidthStr::width(caret.as_str()) as u16;
-        let cursor_x = area
-            .x
-            .saturating_add(prefix_cols)
-            .saturating_add(caret_cols)
-            .min(area.x.saturating_add(area.width.saturating_sub(1)));
-        frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
-    }
     let detail_lines = selected_detail_lines(app, usize::from(area.width));
     let detail_height = detail_lines
         .len()
         .min(usize::from(detail_rows_available(area))) as u16;
-    if detail_height > 0 {
-        let detail_area = Rect {
-            y: area.y.saturating_add(2),
-            height: detail_height,
-            ..area
-        };
-        draw_detail(frame, app, detail_area, &detail_lines);
-    }
+
     let body_area = drawable_body_area_with_detail(area, detail_height);
     let lines = render_body(app, usize::from(body_area.height), usize::from(area.width));
     frame.render_widget(Paragraph::new(lines), body_area);
+
+    // Render detail preview at the bottom of the window (above reserved chrome),
+    // so the matches list begins immediately below the prompt on row 2.
+    if detail_height > 0 {
+        let detail_area = Rect {
+            x: area.x,
+            y: body_area.y + body_area.height,
+            width: area.width,
+            height: detail_height,
+        };
+        draw_detail(frame, app, detail_area, &detail_lines);
+    }
     if let Some(reserved_area) = reserved_bottom_rows(area) {
         frame.render_widget(Clear, reserved_area);
     }
@@ -107,7 +87,7 @@ pub fn draw_with_visible_geometry(
 fn draw_help(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
     let theme = app.theme();
     let width = usize::from(area.width);
-    let height = usize::from(area.height.saturating_sub(RESERVED_BOTTOM_ROWS));
+    let height = usize::from(reserved_bottom_rows(area).map_or(area.height, |r| r.y - area.y));
     if height == 0 || width == 0 {
         return;
     }
@@ -145,7 +125,19 @@ fn draw_help(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
     lines.push(Line::from(title));
 
     let search = if app.help_searching() || !app.help_query().is_empty() {
-        format!(" / {}", app.help_query())
+        let prefix = take_width(" / ", width.saturating_sub(1)).0;
+        let (query, caret) = query_viewport(
+            app.help_query(),
+            app.help_query().chars().count(),
+            width.saturating_sub(prefix.width()),
+        );
+        if app.help_searching() && height >= 2 {
+            frame.set_cursor_position((
+                area.x + (prefix.width() + caret).min(width.saturating_sub(1)) as u16,
+                area.y + 1,
+            ));
+        }
+        format!("{prefix}{query}")
     } else {
         " / to search keys".to_string()
     };
@@ -224,7 +216,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: area.height.saturating_sub(RESERVED_BOTTOM_ROWS),
+        height: height as u16,
     };
     frame.render_widget(Paragraph::new(lines), body);
     if let Some(reserved) = reserved_bottom_rows(area) {
@@ -251,8 +243,7 @@ fn drawable_body_area_with_detail(area: Rect, detail_height: u16) -> Rect {
             area.y.saturating_add(2)
         } else {
             area.y
-        }
-        .saturating_add(detail_height),
+        },
         width: area.width,
         height: area.height.saturating_sub(
             RESERVED_BOTTOM_ROWS
@@ -263,8 +254,10 @@ fn drawable_body_area_with_detail(area: Rect, detail_height: u16) -> Rect {
 }
 
 fn detail_rows_available(area: Rect) -> u16 {
+    // Reserve space for header, prompt, at least 3 list rows, and bottom chrome.
     area.height
-        .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2))
+        .saturating_sub(RESERVED_BOTTOM_ROWS.saturating_add(2).saturating_add(3))
+        .min(4)
 }
 
 fn drawable_status_area(area: Rect) -> Option<Rect> {
@@ -279,7 +272,7 @@ fn drawable_status_area(area: Rect) -> Option<Rect> {
 }
 
 fn reserved_bottom_rows(area: Rect) -> Option<Rect> {
-    if area.height <= RESERVED_BOTTOM_ROWS {
+    if area.height <= RESERVED_BOTTOM_ROWS + 2 {
         return None;
     }
     Some(Rect {
@@ -324,9 +317,16 @@ fn draw_header(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         format!(" {mode} "),
         theme.header_badge_style(theme.mode_accent()),
     );
+    // Search semantics take priority over the optional engine badge.
+    let notice = match (app.relaxed_search(), app.status_message()) {
+        (true, Some(message)) => format!("RELAXED · {}", truncate(message, 20)),
+        (true, None) => "RELAXED: ANY WORD".to_string(),
+        (false, Some(message)) if app.filtered_count() > 0 => truncate(message, 20),
+        _ => engine,
+    };
     push(
         &mut spans,
-        format!(" {engine} "),
+        format!(" {notice} "),
         theme.header_badge_style(theme.engine_accent()),
     );
     if let Some(kind) = kind_filter {
@@ -375,18 +375,6 @@ fn draw_header(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         push(&mut spans, " ".repeat(width - used), theme.status_style());
     }
 
-    // Also keep a plain-text status_text API for unit tests / narrow fallbacks.
-    let _ = status_text_with_engine(
-        width,
-        app.mode(),
-        app.engine(),
-        app.query(),
-        filtered,
-        total,
-        app.message().unwrap_or(""),
-        kind_filter,
-    );
-
     frame.render_widget(Paragraph::new(Line::from(spans)), header_area);
 }
 
@@ -402,12 +390,25 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
     };
     let width = usize::from(prompt_area.width);
     let glyph = if theme.use_icons { " 󰍉 " } else { " > " };
-    let mut spans = vec![Span::styled(glyph, theme.prompt_accent_style())];
+    let glyph = take_width(glyph, width.saturating_sub(1)).0;
+    let mut spans = vec![Span::styled(glyph.clone(), theme.prompt_accent_style())];
     let query = app.query();
-    let kind_hint = app
+    let mut kind_hint = app
         .kind_filter()
         .map(|k| format!("[{}] ", k.stable_key()))
         .unwrap_or_default();
+    if glyph.width() + kind_hint.width() >= width {
+        kind_hint.clear();
+    }
+    let prefix_width = glyph.width() + kind_hint.width();
+    let query_width = width.saturating_sub(prefix_width);
+    let (visible_query, caret_column) = query_viewport(query, app.query_cursor(), query_width);
+    if app.field_mode() == crate::extract_app::FieldMode::Insert {
+        frame.set_cursor_position((
+            area.x + (prefix_width + caret_column).min(width.saturating_sub(1)) as u16,
+            area.y + 1,
+        ));
+    }
     if !kind_hint.is_empty() {
         spans.push(Span::styled(
             kind_hint.clone(),
@@ -436,7 +437,7 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            query.to_string(),
+            visible_query,
             theme.prompt_style().add_modifier(Modifier::BOLD),
         ));
     }
@@ -448,6 +449,35 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect) {
         spans.push(Span::styled(" ".repeat(width - used), theme.prompt_style()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), prompt_area);
+}
+
+/// Keep the logical caret visible without splitting a displayed grapheme.
+fn query_viewport(query: &str, cursor: usize, width: usize) -> (String, usize) {
+    if width == 0 {
+        return (String::new(), 0);
+    }
+    let caret_byte = query
+        .char_indices()
+        .nth(cursor)
+        .map_or(query.len(), |(i, _)| i);
+    let caret = query
+        .grapheme_indices(true)
+        .map(|(i, _)| i)
+        .chain(std::iter::once(query.len()))
+        .take_while(|&i| i <= caret_byte)
+        .last()
+        .unwrap_or(0);
+    let mut start = caret;
+    for (i, _) in query[..caret].grapheme_indices(true).rev() {
+        if query[i..caret].width() >= width {
+            break;
+        }
+        start = i;
+    }
+    (
+        take_width(&query[start..], width).0,
+        query[start..caret].width(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -472,6 +502,7 @@ fn compose_detail_lines(item: &ExtractItem, width: usize, use_icons: bool) -> Ve
         return Vec::new();
     }
 
+    let width = width.saturating_sub(usize::from(width > 1)); // selection rail
     let prefix = format!(
         "  {} {} ",
         kind_icon(item.kind, use_icons),
@@ -549,16 +580,13 @@ fn take_width(text: &str, max_width: usize) -> (String, usize) {
     }
     let mut used_width = 0;
     let mut end = 0;
-    for (index, character) in text.char_indices() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if end > 0 && used_width + character_width > max_width {
+    for (index, grapheme) in text.grapheme_indices(true) {
+        let grapheme_width = grapheme.width();
+        if used_width + grapheme_width > max_width {
             break;
         }
-        used_width += character_width;
-        end = index + character.len_utf8();
-        if used_width >= max_width {
-            break;
-        }
+        used_width += grapheme_width;
+        end = index + grapheme.len();
     }
     (text[..end].to_string(), end)
 }
@@ -578,13 +606,30 @@ fn draw_detail(frame: &mut Frame<'_>, app: &ExtractApp, area: Rect, lines: &[Det
     let rail_style = Style::default().fg(theme.header_muted_fg).bg(bg);
     let fill = Style::default().bg(bg);
     let width = usize::from(area.width);
+    let rail = if width <= 1 {
+        ""
+    } else if theme.use_icons {
+        "│"
+    } else {
+        "|"
+    };
     let rendered = lines
         .iter()
-        .map(|line| {
+        .take(usize::from(area.height))
+        .enumerate()
+        .map(|(index, line)| {
+            let mut text = line.text.clone();
+            if index + 1 == usize::from(area.height) && lines.len() > usize::from(area.height) {
+                let available = width.saturating_sub(rail.width() + line.prefix.width());
+                text = take_width(&text, available.saturating_sub(1)).0;
+                if available > 0 {
+                    text.push('…');
+                }
+            }
             let mut spans = vec![
-                Span::styled("│".to_string(), rail_style),
+                Span::styled(rail.to_string(), rail_style),
                 Span::styled(line.prefix.clone(), prefix_style),
-                Span::styled(line.text.clone(), text_style),
+                Span::styled(text, text_style),
             ];
             let used: usize = spans
                 .iter()
@@ -653,24 +698,29 @@ fn render_row(
         return Line::default();
     }
     // Selection rail + multi-mark star (fzf-inspired).
-    let (rail, mark) = match (selected, marked) {
-        (true, true) => ("▌", "★"),
-        (true, false) => ("▌", " "),
-        (false, true) => ("│", "★"),
-        (false, false) => (" ", " "),
+    let (rail, mark) = if theme.use_icons {
+        match (selected, marked) {
+            (true, true) => ("▌", "★"),
+            (true, false) => ("▌", " "),
+            (false, true) => ("│", "★"),
+            (false, false) => (" ", " "),
+        }
+    } else {
+        match (selected, marked) {
+            (true, true) => (">", "*"),
+            (true, false) => (">", " "),
+            (false, true) => ("|", "*"),
+            (false, false) => (" ", " "),
+        }
     };
     let icon = kind_icon(item.kind, theme.use_icons);
     let chip = format!(" {} {} ", icon, item.kind.stable_key().to_ascii_uppercase());
     let prefix_width = UnicodeWidthStr::width(rail) + UnicodeWidthStr::width(mark) + 1;
     let chip_width = UnicodeWidthStr::width(chip.as_str());
     let available = width.saturating_sub(prefix_width + chip_width);
-    let text_chars: Vec<char> = item.text.chars().collect();
-    let truncated = text_chars.len() > available;
-    let content_len = if truncated && available > 0 {
-        available.saturating_sub(1)
-    } else {
-        available
-    };
+    let truncated = item.text.width() > available;
+    let content_width = available.saturating_sub(usize::from(truncated));
+    let (visible, _) = take_width(&item.text, content_width);
     let base_style = row_style(theme, item.kind, selected);
     let match_style = if selected {
         base_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
@@ -688,13 +738,16 @@ fn render_row(
         chip,
         theme.kind_chip_style(item.kind, selected),
     ));
-    for (index, character) in text_chars.iter().take(content_len).enumerate() {
-        let style = if positions.contains(&index) {
+    let mut char_index = 0;
+    for grapheme in visible.graphemes(true) {
+        let char_end = char_index + grapheme.chars().count();
+        let style = if positions.iter().any(|p| (char_index..char_end).contains(p)) {
             match_style
         } else {
             base_style
         };
-        spans.push(Span::styled(character.to_string(), style));
+        spans.push(Span::styled(grapheme.to_string(), style));
+        char_index = char_end;
     }
     if truncated && available > 0 {
         spans.push(Span::styled("…", base_style));
@@ -822,14 +875,10 @@ fn truncate(s: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let count = s.chars().count();
-    if count <= width {
+    if s.width() <= width {
         return s.to_string();
     }
-    if width <= 1 {
-        return s.chars().take(width).collect();
-    }
-    let mut out: String = s.chars().take(width - 1).collect();
+    let mut out = take_width(s, width - 1).0;
     out.push('…');
     out
 }
@@ -869,6 +918,154 @@ mod tests {
     fn status_text_shows_counts() {
         let text = status_text(80, ExtractMode::Scrollback, "-", 4, 9, "");
         assert!(text.contains("4/9"));
+    }
+
+    #[test]
+    fn detail_budgets_rail_and_marks_capped_content() {
+        for width in [63, 120] {
+            let item = ExtractItem {
+                text: format!("/{}TAILZ", "x".repeat(width - 15)),
+                kind: ItemKind::Path,
+            };
+            let lines = compose_detail_lines(&item, width, false);
+            assert_eq!(lines.len(), 2);
+            assert_eq!(
+                lines.iter().map(|l| l.text.as_str()).collect::<String>(),
+                item.text
+            );
+            assert!(lines
+                .iter()
+                .all(|l| 1 + l.prefix.width() + l.text.width() <= width));
+            let long = ExtractItem {
+                text: format!("/{}TAILZ", "漢".repeat(1000)),
+                kind: ItemKind::Path,
+            };
+            let app = ExtractApp::new(vec![long], crate::theme::Theme::default());
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width as u16, 24))
+                    .unwrap();
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            let final_detail: String = (0..width as u16)
+                .map(|x| terminal.backend().buffer()[(x, 20)].symbol())
+                .collect();
+            assert!(final_detail.trim_end().ends_with('…'));
+        }
+    }
+
+    #[test]
+    fn active_help_search_has_a_visible_scrolling_caret() {
+        use crate::extract_app::ExtractInput;
+        for height in [2, 4, 24] {
+            let mut app = ExtractApp::new(Vec::new(), crate::theme::Theme::default());
+            app.handle_input(ExtractInput::ToggleHelp);
+            app.handle_input(ExtractInput::Char('/'));
+            app.handle_paste(&format!("{}TAILZ", "漢".repeat(100)));
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(63, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert_eq!(cursor.y, 1);
+            assert!(cursor.x < 63);
+            let prompt: String = (0..63)
+                .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+                .collect();
+            assert!(prompt.contains("TAILZ"), "height={height}");
+        }
+    }
+
+    #[test]
+    fn relaxed_results_have_a_visible_notice_and_strict_results_clear_it() {
+        use crate::extract_app::ExtractInput;
+        for width in [63, 120] {
+            let mut app = ExtractApp::new(
+                vec![ExtractItem {
+                    text: "SAPPHIRE ORBIT".into(),
+                    kind: ItemKind::Code,
+                }],
+                crate::theme::Theme::default(),
+            );
+            for c in "SAPPHIRE MISSING".chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            let header = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> String {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                    .collect()
+            };
+            assert!(header(&terminal).contains("RELAXED: ANY WORD"));
+            app.set_message(Some("mode read failed".into()));
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            assert!(header(&terminal).contains("RELAXED"));
+            assert!(header(&terminal).contains("mode read failed"));
+            app.handle_input(ExtractInput::ClearQuery);
+            for c in "SAPPHIRE ORBIT".chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            assert!(!header(&terminal).contains("RELAXED"));
+        }
+    }
+
+    #[test]
+    fn unicode_rows_preserve_clusters_and_budget_display_cells() {
+        let theme = crate::theme::Theme::default();
+        for text in ["漢字".repeat(100), "e\u{301}".repeat(100), "👩‍💻".repeat(100)] {
+            let item = ExtractItem {
+                text,
+                kind: ItemKind::Code,
+            };
+            let line = render_row(&theme, true, false, &item, &[1], 63);
+            let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(rendered.width(), 63);
+            assert!(rendered.trim_end().ends_with('…'), "{rendered:?}");
+        }
+        for text in ["Cafe\u{301}", "👩‍💻"] {
+            let item = ExtractItem {
+                text: text.into(),
+                kind: ItemKind::Code,
+            };
+            let line = render_row(&theme, true, false, &item, &[3], 63);
+            assert!(line
+                .spans
+                .iter()
+                .any(|s| s.content.contains(if text.starts_with('C') {
+                    "e\u{301}"
+                } else {
+                    text
+                })));
+        }
+    }
+
+    #[test]
+    fn long_query_view_follows_edits_and_short_prompt_survives() {
+        use crate::extract_app::ExtractInput;
+        for height in [2, 3, 4, 5, 24] {
+            let mut app = ExtractApp::new(Vec::new(), crate::theme::Theme::default());
+            for c in format!("{}TAILZ", "a".repeat(100)).chars() {
+                app.handle_input(ExtractInput::Char(c));
+            }
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(63, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            let row = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> String {
+                (0..63)
+                    .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+                    .collect()
+            };
+            assert!(row(&terminal).contains("TAILZ"), "height={height}");
+            app.handle_input(ExtractInput::Left);
+            app.handle_input(ExtractInput::Char('Q'));
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            assert!(row(&terminal).contains("TAILQZ"), "height={height}");
+            let caret = terminal.get_cursor_position().unwrap();
+            assert_eq!(
+                terminal.backend().buffer()[(caret.x, caret.y)].symbol(),
+                "Z"
+            );
+        }
     }
 
     #[test]
@@ -1016,16 +1213,19 @@ mod tests {
             "prompt row missing search glyph: {prompt:?}"
         );
 
-        // The selected detail is soft-wrapped at the full frame width, so its
-        // content fills columns beyond the 30-column pane rectangle.
-        let first_detail_row = row_text(2);
-        assert!(first_detail_row.trim_end().chars().count() > 30);
-        // Detail rows start with an accent rail + kind chip, then the value.
+        // Row 2 is the active match in the list, directly below the search box.
+        let match_row = row_text(2);
         assert!(
-            first_detail_row.contains("PATH") && first_detail_row.contains("/long/lab/path"),
-            "detail missing path content: {first_detail_row:?}"
+            match_row.contains("PATH") && match_row.contains("/long/lab/path"),
+            "match row missing path content: {match_row:?}"
         );
-        let reconstructed = format!("{}{}", row_text(2).trim_end(), row_text(3).trim_end());
+
+        // The selected detail is soft-wrapped at the bottom of the window (rows 7-8),
+        // so its content fills columns beyond the 30-column pane rectangle.
+        let detail_row_1 = row_text(7);
+        let detail_row_2 = row_text(8);
+        assert!(detail_row_1.trim_end().chars().count() > 30);
+        let reconstructed = format!("{}{}", detail_row_1.trim_end(), detail_row_2.trim_end());
         assert!(
             reconstructed.contains(&long_path)
                 || reconstructed.replace(' ', "").contains("long/lab/path"),
@@ -1070,7 +1270,7 @@ mod tests {
         );
         assert_eq!(
             drawable_body_area_with_detail(area, 3),
-            Rect::new(2, 8, 30, 4)
+            Rect::new(2, 5, 30, 4)
         );
         assert_eq!(drawable_status_area(area), Some(Rect::new(2, 3, 30, 1)));
         assert_eq!(reserved_bottom_rows(area), Some(Rect::new(2, 12, 30, 3)));

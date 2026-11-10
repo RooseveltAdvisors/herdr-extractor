@@ -2,7 +2,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use herdr_extractor::clipboard::copy_to_clipboard;
 use herdr_extractor::config::{load_extract_settings, NlpEngine, NlpSettings};
 use herdr_extractor::extract_app::{ExtractApp, ExtractInput, ExtractMode, ExtractionEngine};
@@ -22,8 +25,9 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            log_state(&format!("error: {error:#}"));
-            eprintln!("herdr-extractor: {error:#}");
+            let diagnostic = escape_terminal_controls(&format!("{error:#}"));
+            log_state(&format!("error: {diagnostic}"));
+            eprintln!("herdr-extractor: {diagnostic}");
             ExitCode::from(1)
         }
     }
@@ -95,6 +99,7 @@ fn run_tui(
 ) -> Result<Outcome> {
     let _restore = TerminalRestore;
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
     let mut geometry = read_pane_geometry(client, pane_id);
     loop {
         terminal.draw(|frame| {
@@ -142,6 +147,7 @@ fn run_tui(
                     }
                 }
             }
+            Event::Paste(text) => app.handle_paste(&text),
             Event::Resize(_, _) => {
                 geometry = read_pane_geometry(client, pane_id);
             }
@@ -328,6 +334,13 @@ fn show_notification(client: &mut SocketClient, title: &str) {
 }
 
 fn key_to_input(key: KeyEvent) -> Option<ExtractInput> {
+    if key.kind == KeyEventKind::Release
+        || key.modifiers.intersects(
+            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+        )
+    {
+        return None;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Some(ExtractInput::CtrlC),
@@ -387,6 +400,18 @@ fn visible_wrap_width(layout_width: usize) -> usize {
     }
 }
 
+fn escape_terminal_controls(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 fn log_state(message: &str) {
     let Some(directory) = std::env::var_os("HERDR_PLUGIN_STATE_DIR") else {
         return;
@@ -405,6 +430,7 @@ struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
         ratatui::restore();
     }
 }
@@ -459,6 +485,38 @@ mod tests {
         assert!(is_transcript_entrypoint(Some("extract-transcript")));
         assert!(!is_transcript_entrypoint(Some("extract")));
         assert!(!is_transcript_entrypoint(None));
+    }
+
+    #[test]
+    fn fatal_diagnostics_escape_untrusted_terminal_controls() {
+        let message = "bad color \x1b]0;marker\x07 \x1bPmarker\x1b\\ \x1b[s \u{9b}2J Café";
+        let escaped = escape_terminal_controls(message);
+        assert!(!escaped.chars().any(char::is_control));
+        assert!(escaped.contains("marker"));
+        assert!(escaped.contains("Café"));
+    }
+
+    #[test]
+    fn release_and_unsupported_modifiers_never_execute_actions() {
+        for code in [KeyCode::Enter, KeyCode::Char('d'), KeyCode::Char('a')] {
+            assert_eq!(
+                key_to_input(KeyEvent::new_with_kind(
+                    code,
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release
+                )),
+                None
+            );
+            assert_eq!(key_to_input(KeyEvent::new(code, KeyModifiers::ALT)), None);
+        }
+        assert_eq!(
+            key_to_input(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            Some(ExtractInput::Char('a'))
+        );
     }
 
     #[test]

@@ -337,19 +337,9 @@ fn quality_score(candidate: &RankedItem) -> i64 {
 }
 
 fn strip_terminal_artifacts(text: &str) -> String {
-    static ANSI: OnceLock<Regex> = OnceLock::new();
-    let ansi = ANSI.get_or_init(|| {
-        Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))").expect("ANSI regex")
-    });
-    ansi.replace_all(text, "")
-        .chars()
-        .filter(|character| {
-            !matches!(
-                *character,
-                '\u{2500}'..='\u{27bf}' | '\u{e000}'..='\u{f8ff}' | '⋅' | '↴'
-            )
-        })
-        .collect()
+    // Terminal control framing needs a parser, not a greedy OSC regex.
+    // Symbol exclusions belong to loose-word matching, never source mutation.
+    strip_ansi_escapes::strip_str(text)
 }
 
 fn canonicalize(value: &str) -> String {
@@ -378,12 +368,6 @@ fn junk_token(value: &str) -> bool {
         || ratio.is_match(value)
         || ansi.is_match(value)
         || value.chars().all(|character| !character.is_alphanumeric())
-        || value.chars().any(|character| {
-            matches!(
-                character,
-                '\u{2500}'..='\u{27bf}' | '\u{e000}'..='\u{f8ff}'
-            )
-        })
 }
 
 fn word_redundant_with_specialized(word: &str, specialized: &ExtractItem) -> bool {
@@ -1239,6 +1223,21 @@ mod tests {
         assert!(!extract_items_from_visible_text("hi")
             .iter()
             .any(|item| item.text == "hi"));
+    }
+
+    #[test]
+    fn meaningful_unicode_and_osc_hyperlink_labels_survive_cleanup() {
+        for text in ["/tmp/dir✓check/CHECKFILE.txt", "\"QUOTESYMBOL ✓ ready\""] {
+            let items = extract_items_from_visible_text(text);
+            assert!(items.iter().any(|item| item.text == text), "{items:?}");
+        }
+        for terminator in ["\x07", "\x1b\\"] {
+            let label = "https://label.example.test/OSC_ST_ENTITY";
+            let text =
+                format!("\x1b]8;;https://destination.test/{terminator}{label}\x1b]8;;{terminator}");
+            let items = extract_items_from_visible_text(&text);
+            assert!(items.iter().any(|item| item.text == label), "{items:?}");
+        }
     }
 
     #[test]

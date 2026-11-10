@@ -294,8 +294,8 @@ pub fn parse_color(input: &str) -> Result<Color> {
 }
 
 fn parse_hex_color(input: &str) -> Result<Color> {
-    let hex = input.trim_start_matches('#');
-    if hex.len() != 6 {
+    let hex = input.strip_prefix('#').unwrap_or(input);
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("hex colors must use #RRGGBB, got '{input}'");
     }
     let red = u8::from_str_radix(&hex[0..2], 16)?;
@@ -338,5 +338,8 @@ mod tests {
     #[test]
     fn rejects_unknown_colors() {
         assert!(parse_color("not-a-color").is_err());
+        for input in ["#€abc", "#💻ab", "#éabcd", "##aabbcc", "#aabbzz"] {
+            assert!(parse_color(input).is_err(), "{input}");
+        }
     }
 }

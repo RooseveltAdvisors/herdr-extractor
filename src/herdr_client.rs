@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::{error::Error, fmt};
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::session_history;
@@ -66,6 +67,13 @@ pub struct PaneText {
     pub text: String,
     pub source: PaneReadSource,
     pub truncated: bool,
+}
+
+#[derive(Deserialize)]
+struct PaneReadPayload {
+    text: String,
+    #[serde(default)]
+    truncated: bool,
 }
 
 /// The pane rectangle Herdr reports in the current tab layout.
@@ -235,13 +243,12 @@ impl SocketClient {
         }
         let result = self.call("pane.read", params)?;
         expect_type(&result, "pane_read")?;
+        let read: PaneReadPayload = serde_json::from_value(result["read"].clone())
+            .context("pane_read result contained invalid read payload")?;
         Ok(PaneText {
-            text: result["read"]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            text: read.text,
             source: PaneReadSource::Visible,
-            truncated: result["read"]["truncated"].as_bool().unwrap_or(false),
+            truncated: read.truncated,
         })
     }
 
@@ -364,6 +371,39 @@ mod tests {
             .unwrap()
             .as_nanos();
         PathBuf::from(format!("/tmp/herdr-extractor-{unique}.sock"))
+    }
+
+    #[test]
+    fn malformed_pane_text_is_an_error_not_an_empty_success() {
+        for read in [
+            json!({"text":7}),
+            json!({"text":null}),
+            json!({}),
+            json!({"text":"ok", "truncated":7}),
+            json!({"text":""}),
+        ] {
+            let valid = read == json!({"text":""});
+            let path = socket_path();
+            let listener = UnixListener::bind(&path).unwrap();
+            let handle = std::thread::spawn(move || {
+                let _probe = listener.accept().unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let response = json!({"id":"1", "result":{"type":"pane_read", "read":read}});
+                writeln!(stream, "{response}").unwrap();
+            });
+            let mut client = SocketClient::connect(&path).unwrap();
+            let result = client.read_pane_source("p1", "visible", None);
+            assert_eq!(result.is_ok(), valid);
+            if valid {
+                assert_eq!(result.unwrap().text, "");
+            }
+            handle.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
