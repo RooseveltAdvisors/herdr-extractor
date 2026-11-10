@@ -9,8 +9,8 @@ Every copy-eligible token in the focused pane, one keystroke away. Type to narro
 
 ![The extract picker opening over a deploy session, narrowing 110 tokens to one URL with the query "stgdep", and copying it](docs/demo/extract-demo.gif)
 
-Recorded against the release binary reading synthetic scrollback. The closing `copied → …` line is
-the plugin's own state log, not a caption.
+These demo assets show an earlier layout with synthetic scrollback. The current picker places matches directly below the query.
+The detail preview now sits below the list. The closing `copied → …` line comes from the plugin's state log.
 
 **1 · The scrollback the picker reads.** An ordinary working pane: deploy output, a failing health
 probe, config paths, an artifact hash, quoted failure reasons.
@@ -25,11 +25,11 @@ and glyph. The selected row is marked by a full-width highlight that survives an
 
 **3 · Fuzzy typeahead, in-house.** `stg` is a subsequence, not a substring — it reaches
 `/srv/releases/staging/…` and `https://staging.example.internal/…` alike. Matched characters are
-underlined in place, and the wrapped detail line above the list always shows the complete selection.
+underlined in place. The current detail preview wraps below the list, with an ellipsis when its four-row limit hides content.
 
 ![The same picker filtered to 11 of 110 tokens by the query "stg", with the matched characters underlined in each row](docs/demo/03-fuzzy.png)
 
-**4 · `Tab` switches to the whole session** (`ctrl-g` does the same). Scrollback mode reads the pane's retained scrollback;
+**4 · Global scope reads the whole session.** Cycle past Screen with `Tab` or `Ctrl-G`. Scrollback mode reads the pane's retained scrollback;
 global mode reads the pane's full saved session history — here 190 tokens instead of 110, including
 lines that scrolled past Herdr's 1000-line `pane.read` cap. The badge in the header always names the
 active mode, and the filter query survives the toggle.
@@ -44,20 +44,20 @@ invention. It adapts extrakto's token-picking lineage to Herdr's scrollback and 
 
 ## Actions
 
-One action, one picker, two data modes:
+One picker provides three scopes:
 
 | Action | Default key | Reads |
 | --- | --- | --- |
-| `RooseveltAdvisors.herdr-extractor.extract` | `prefix+space` | Retained pane scrollback; press `Tab` inside the picker to switch to the full saved session history |
+| `RooseveltAdvisors.herdr-extractor.extract` | `prefix+space` | Retained scrollback. `Tab` cycles through Screen and Global scopes |
 | `RooseveltAdvisors.herdr-extractor.extract_transcript` | optional (for example `prefix+shift+space`) | The pane's full retained session transcript, opening the picker straight in global mode |
 
 ### In-menu mode toggle (`Tab`)
 
-The `prefix+space` extract picker has a mode toggle built in. Press `Tab` inside the overlay to
-switch between the two data modes:
+Press `Tab` or `Ctrl-G` inside the picker to cycle through three scopes:
 
 - **scrollback mode** (`SCROLLBACK` in the header): the focused pane's retained
   scrollback, as always.
+- **screen mode** (`SCREEN` in the header): only the current visible viewport.
 - **global mode** (`GLOBAL` in the header): the pane's full saved session history, the same transcript-grade
   coverage the `extract_transcript` action provides. When Herdr saves pane history
   (`experimental.pane_history = true`, default off) this reads every retained line from
@@ -66,20 +66,32 @@ switch between the two data modes:
 
 Toggling re-extracts live and keeps the current filter query and selection where possible. The
 active mode is always visible in the top header, and the hint text names the toggle
-(`tab mode`).
+(`tab scope`). Successful scope changes clear marks. Failed reads preserve the old scope, results, selection, and marks.
 
-The picker uses a dense gh-dash-inspired layout: a colored top header shows the mode and active
-engine badge (`SCROLLBACK:REGEX`, `GLOBAL:NLP`), match count, and `tab mode · enter copy · esc
-cancel` hints; each row has a semantic color, compact kind chip, and Nerd-Font glyph (with ASCII
-fallback); a prompt line shows the live query and a wrapped detail area shows the complete selected
-item; the list highlights matched characters. The header is intentionally top-anchored so
-all captain-facing status survives Herdr's measured bottom overlay chrome. Three bottom pane rows
-are reserved as decoration, controlled by the documented `RESERVED_BOTTOM_ROWS` constant.
+The header shows editing mode, scope, engine, and counts. Each result has a colored kind chip and a selection marker.
+Matches begin directly below the query. Query edits select the best match again.
+The lower detail preview uses up to four rows. An ellipsis marks hidden content, but copying retains the complete value.
+The picker reserves three bottom rows for Herdr chrome when space allows. Short layouts preserve the query prompt.
 
-Matching is implemented in-house with the existing ratatui/crossterm stack: smart-case
-subsequence matching scores contiguous runs and word-boundary starts, and adds no external `fzf`
-binary dependency. Keeping it in the plugin preserves a single static binary and lets Tab trigger
-live mode re-extraction directly.
+Search uses smart-case, fzf-style scoring without an external `fzf` executable. Exact and prefix matches receive higher ranking.
+Space-separated words match in any order. If no result matches every word, partial matches appear with a `RELAXED: ANY WORD` badge.
+Unicode comparisons use lowercasing, not full case folding. Display and editing preserve grapheme clusters, including accents and emoji.
+
+### Editing and help
+
+The picker opens in Insert mode. `Esc` enters Normal mode, and typed `jj` does the same.
+Bracketed paste inserts literal text in Insert mode, so pasted `?` and `jj` do not execute commands.
+The picker replaces pasted line breaks and tabs with spaces. Normal mode ignores pasted text.
+
+- `j/k` or arrows move through results. `gg/G` select the first or last result.
+- `i/a/I/A` or `/` return to Insert mode. `w/b/e`, `0/$`, and `x/X` edit the query in Normal mode.
+- `dd` or `D` clears the query. These are limited Vim-like bindings, not a complete Vim editor.
+- `Space` marks results in Normal mode. `Enter` copies marks in original result order, separated by newlines.
+- `Ctrl-D` pages down. `Ctrl-U` pages up in Normal mode and clears the query in Insert mode.
+- `Ctrl-K/Ctrl-J` cycle kind filters. Explicit prefixes include `kind:url`, `u:`, and `p:`. Bare single letters remain search text.
+- `?` opens help. `/` searches help, and `j/k` navigate outside help search. Help search has its own visible caret.
+- In help search, the first `Esc` stops editing. The next `Esc` closes help and restores the previous editing mode.
+- In Normal mode, `Esc` clears an active query or kind filter. With no filter, `Esc` closes the picker. `Ctrl-C` always closes it.
 
 ### Scrollback extract (`prefix+space`)
 
@@ -99,16 +111,15 @@ live mode re-extraction directly.
    ANSI/SGR residue, box fragments, ratios, percentages, punctuation tails, and wrapped slivers
    are discarded. Canonicalized duplicates collapse to one item, ranked by recency, semantic
    usefulness, length, and character variety.
-4. Type to filter. `Up`/`Down` or `Ctrl-p`/`Ctrl-n` moves selection. `Tab` toggles between
-   scrollback and global (full session history) modes. `Enter` copies exactly one item
-   through OSC 52. `Esc` or `Ctrl-C` cancels.
+4. Type to filter. `Up`/`Down` or `Ctrl-P`/`Ctrl-N` moves selection. `Tab` cycles Scrollback, Screen, and Global scopes.
+   `Enter` copies the selected item or marked items through OSC 52. `Esc` follows the editing-mode rules above. `Ctrl-C` cancels.
 
 ### Session transcript extract (`extract_transcript`)
 
 `RooseveltAdvisors.herdr-extractor.extract_transcript` opens the `extract-transcript` overlay
 entrypoint and reads the whole retained session transcript, not just the current viewport. It
 starts the picker straight in global mode; inside the picker it behaves exactly like the
-`prefix+space` extract with `Tab` already applied. Keep the binding only if you want a
+`prefix+space` picker after cycling to Global scope. Keep the binding only if you want a
 shortcut that lands directly in global mode - the in-menu toggle covers the same data.
 
 - The transcript source covers the whole retained session. When Herdr saves pane history
@@ -155,7 +166,7 @@ Copy mode is for READING; `prefix+space` is for TAKING. Scroll through pane outp
 exit to normal mode, then invoke `RooseveltAdvisors.herdr-extractor.extract` with `prefix+space`.
 The picker searches retained scrollback and copies the chosen result through OSC 52, so it reaches
 the outer terminal clipboard (including the captain's Mac). When the token may sit far above the
-current viewport, press `Tab` inside the picker to switch to global mode and search the pane's
+current viewport, cycle to Global with `Tab` inside the picker and search the pane's
 full saved session history.
 
 This action moved out of `RooseveltAdvisors.herdr-leap` in the public plugin split. Do not bind
@@ -221,19 +232,23 @@ extra process:
   several classes compete
 
 Stable kind keys shown in the picker: `url`, `path`, `quote`, `squote`, `word`, `command`, `hash`,
-`version`, `error`, `code`, `email`, `ip`, `uuid`, `host`, `id`, `env`, `phrase`.
+`version`, `error`, `code`, `email`, `ip`, `uuid`, `host`, `id`, `env`, `phrase`, `date`, `color`.
 
 ### Optional NLP sidecar contract
 
 For heavier external models (spaCy, transformers, ONNX), enable the Unix-socket sidecar. When
 `[nlp].enabled = true` (or `engine = "sidecar"` / `"auto"`), the plugin connects to the configured
-socket for each extraction with a 180ms read/write deadline. If `socket_path` is omitted it uses
+socket for each extraction with one 180ms budget shared across connection, writes, and reads. If `socket_path` is omitted it uses
 `HERDR_NLP_SOCKET_PATH`, then `nlp.sock` under the plugin config directory. `engine = "auto"` only
 dials when the socket path already exists. A connection, timeout, or protocol error is logged and
 the built-in list is kept. Tab mode switches repeat the same bounded request, and the header
 reports `NLP` only after a sidecar request succeeds.
 
-The protocol is one JSON request and one JSON response per connection:
+The protocol requires one newline-terminated JSON request and response per connection. Responses must declare integer version `1`.
+The response limit is 1 MiB, including the newline. Candidate confidence must be finite and within `0..1`.
+Protocol errors retain the built-in results and record a fallback reason.
+
+Request:
 
 ```json
 {"version":1,"text":"cargo test --release"}
